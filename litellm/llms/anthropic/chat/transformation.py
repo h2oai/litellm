@@ -1506,9 +1506,21 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 optional_params["metadata"] = {"user_id": value}
             elif param == "thinking":
                 optional_params["thinking"] = value
-            elif param == "reasoning_effort" and isinstance(value, str):
+            elif param == "reasoning_effort":
+                # Accept both string ("low") and dict ({"effort": "low",
+                # "summary": "concise"}). The Responses->Chat parser keeps the
+                # full dict when `summary` is set (see #25359), so a dict here
+                # is the standard shape Otto/OpenAI-Responses-Bridge callers
+                # send. Coerce to the effort string before mapping — same
+                # shape-tolerance the GPT-5 path already implements in
+                # `_normalize_reasoning_effort_for_chat_completion`.
+                effort_value = value
+                if isinstance(effort_value, dict):
+                    effort_value = effort_value.get("effort")
+                if not isinstance(effort_value, str):
+                    continue
                 mapped_thinking = AnthropicConfig._map_reasoning_effort(
-                    reasoning_effort=value,
+                    reasoning_effort=effort_value,
                     model=model,
                     llm_provider=self.custom_llm_provider or "anthropic",
                 )
@@ -1519,12 +1531,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     optional_params["thinking"] = mapped_thinking
                     if AnthropicConfig._is_adaptive_thinking_model(model):
                         mapped_effort = REASONING_EFFORT_TO_OUTPUT_CONFIG_EFFORT.get(
-                            value
+                            effort_value
                         )
                         if mapped_effort is None:
                             AnthropicConfig._raise_invalid_reasoning_effort(
                                 model=model,
-                                value=value,
+                                value=effort_value,
                                 llm_provider=self.custom_llm_provider or "anthropic",
                             )
                         optional_params["output_config"] = {"effort": mapped_effort}
@@ -1809,9 +1821,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         Translate messages to anthropic format.
         """
         ## VALIDATE REQUEST
-        """
-        Anthropic doesn't support tool calling without `tools=` param specified.
-        """
+        """Anthropic requires ``tools`` when messages include tool blocks; LiteLLM injects a dummy tool if omitted (no ``modify_params`` needed)."""
         from litellm.litellm_core_utils.prompt_templates.factory import (
             anthropic_messages_pt,
         )
@@ -1821,16 +1831,9 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             and messages is not None
             and has_tool_call_blocks(messages)
         ):
-            if litellm.modify_params:
-                optional_params["tools"], _ = self._map_tools(
-                    add_dummy_tool(custom_llm_provider="anthropic")
-                )
-            else:
-                raise litellm.UnsupportedParamsError(
-                    message="Anthropic doesn't support tool calling without `tools=` param specified. Pass `tools=` param OR set `litellm.modify_params = True` // `litellm_settings::modify_params: True` to add dummy tool to the request.",
-                    model="",
-                    llm_provider="anthropic",
-                )
+            optional_params["tools"], _ = self._map_tools(
+                add_dummy_tool(custom_llm_provider="anthropic")
+            )
 
         # Drop thinking param if thinking is enabled but thinking_blocks are missing
         # This prevents the error: "Expected thinking or redacted_thinking, but found tool_use"
@@ -2156,8 +2159,16 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         speed: Optional[str] = None,
     ) -> Usage:
         # NOTE: Sometimes the usage object has None set explicitly for token counts, meaning .get() & key access returns None, and we need to account for this
-        prompt_tokens = usage_object.get("input_tokens", 0) or 0
-        completion_tokens = usage_object.get("output_tokens", 0) or 0
+        raw_prompt_tokens = usage_object.get("input_tokens", 0) or 0
+        prompt_tokens: int = (
+            int(raw_prompt_tokens) if isinstance(raw_prompt_tokens, (int, float)) else 0
+        )
+        raw_completion_tokens = usage_object.get("output_tokens", 0) or 0
+        completion_tokens: int = (
+            int(raw_completion_tokens)
+            if isinstance(raw_completion_tokens, (int, float))
+            else 0
+        )
         _usage = usage_object
         cache_creation_input_tokens: int = 0
         cache_read_input_tokens: int = 0
@@ -2226,11 +2237,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             text_tokens=raw_input_tokens,
         )
         # Always populate completion_token_details, not just when there's reasoning_content
-        reasoning_tokens = (
+        estimated_reasoning_tokens = (
             token_counter(text=reasoning_content, count_response_tokens=True)
             if reasoning_content
             else 0
         )
+        reasoning_tokens = min(estimated_reasoning_tokens, completion_tokens)
         completion_token_details = CompletionTokensDetailsWrapper(
             reasoning_tokens=reasoning_tokens if reasoning_tokens > 0 else 0,
             text_tokens=(
