@@ -578,7 +578,7 @@ class SagemakerLLM(BaseAWSLLM):
         logger_fn=None,
     ):
         """
-        Supports Hugging Face (TGI), Voyage, and Cohere embedding endpoints
+        Supports both Huggingface Jumpstart embeddings and Voyage models
         """
         ### BOTO3 INIT
         import boto3

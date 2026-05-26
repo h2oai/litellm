@@ -1,7 +1,7 @@
 """
 Translate from OpenAI's `/v1/embeddings` to Sagemaker's `/invoke`
 
-In the Huggingface TGI format.
+In the Huggingface TGI format. 
 """
 
 from typing import TYPE_CHECKING, Any, List, Optional, Union
@@ -11,13 +11,12 @@ if TYPE_CHECKING:
 
 from httpx._models import Headers, Response
 
-from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.base_llm.embedding.transformation import BaseEmbeddingConfig
+from litellm.llms.base_llm.chat.transformation import BaseLLMException
+from litellm.types.utils import Usage, EmbeddingResponse
 from litellm.llms.voyage.embedding.transformation import VoyageEmbeddingConfig
-from litellm.types.utils import EmbeddingResponse, Usage
 
 from ..common_utils import SagemakerError
-from .cohere_transformation import SagemakerCohereEmbeddingConfig
 
 
 class SagemakerEmbeddingConfig(BaseEmbeddingConfig):
@@ -39,20 +38,17 @@ class SagemakerEmbeddingConfig(BaseEmbeddingConfig):
         Returns:
             Appropriate embedding config instance
         """
-        model_lower = model.lower()
-        if "voyage" in model_lower:
+        if "voyage" in model.lower():
             return VoyageEmbeddingConfig()
-        if "cohere" in model_lower:
-            return SagemakerCohereEmbeddingConfig()
-        return cls()
+        else:
+            return cls()
 
     def get_supported_openai_params(self, model: str) -> List[str]:
-        model_lower = model.lower()
-        if "voyage" in model_lower:
+        # Check if this is an embedding model
+        if "voyage" in model.lower():
             return VoyageEmbeddingConfig().get_supported_openai_params(model)
-        if "cohere" in model_lower:
-            return SagemakerCohereEmbeddingConfig().get_supported_openai_params(model)
-        return []
+        else:
+            return []
 
     def map_openai_params(
         self,

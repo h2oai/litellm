@@ -549,11 +549,7 @@ class TestHookHeaderMergePriority:
         captured_extra_headers: Dict[str, Any] = {}
 
         async def fake_create_mcp_client(
-            server,
-            mcp_auth_header=None,
-            extra_headers=None,
-            stdio_env=None,
-            subject_token=None,
+            server, mcp_auth_header=None, extra_headers=None, stdio_env=None
         ):
             captured_extra_headers["value"] = extra_headers
             mock_client = MagicMock()
@@ -593,11 +589,7 @@ class TestHookHeaderMergePriority:
         captured_extra_headers: Dict[str, Any] = {}
 
         async def fake_create_mcp_client(
-            server,
-            mcp_auth_header=None,
-            extra_headers=None,
-            stdio_env=None,
-            subject_token=None,
+            server, mcp_auth_header=None, extra_headers=None, stdio_env=None
         ):
             captured_extra_headers["value"] = extra_headers
             mock_client = MagicMock()
@@ -643,11 +635,7 @@ class TestHookHeaderMergePriority:
         captured_extra_headers: Dict[str, Any] = {}
 
         async def fake_create_mcp_client(
-            server,
-            mcp_auth_header=None,
-            extra_headers=None,
-            stdio_env=None,
-            subject_token=None,
+            server, mcp_auth_header=None, extra_headers=None, stdio_env=None
         ):
             captured_extra_headers["value"] = extra_headers
             mock_client = MagicMock()
@@ -703,11 +691,7 @@ class TestHookHeaderMergePriority:
         captured_extra_headers: Dict[str, Any] = {}
 
         async def fake_create_mcp_client(
-            server,
-            mcp_auth_header=None,
-            extra_headers=None,
-            stdio_env=None,
-            subject_token=None,
+            server, mcp_auth_header=None, extra_headers=None, stdio_env=None
         ):
             captured_extra_headers["value"] = extra_headers
             mock_client = MagicMock()
@@ -755,11 +739,7 @@ class TestHookHeaderMergePriority:
         captured_extra_headers: Dict[str, Any] = {}
 
         async def fake_create_mcp_client(
-            server,
-            mcp_auth_header=None,
-            extra_headers=None,
-            stdio_env=None,
-            subject_token=None,
+            server, mcp_auth_header=None, extra_headers=None, stdio_env=None
         ):
             captured_extra_headers["value"] = extra_headers
             mock_client = MagicMock()

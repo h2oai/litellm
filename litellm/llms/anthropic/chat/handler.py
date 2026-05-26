@@ -579,10 +579,6 @@ class ModelResponseIterator:
         # Accumulate compaction blocks for multi-turn reconstruction
         self.compaction_blocks: List[Dict[str, Any]] = []
 
-        # Accumulate streamed thinking text so final usage can split reasoning
-        # tokens from regular output tokens.
-        self.reasoning_content_chunks: List[str] = []
-
         # Track server tool use inputs and results for code_interpreter_results
         self._server_tool_inputs: Dict[str, Any] = {}
         self.tool_results: List[Dict[str, Any]] = []
@@ -613,14 +609,9 @@ class ModelResponseIterator:
         return False
 
     def _handle_usage(self, anthropic_usage_chunk: Union[dict, UsageDelta]) -> Usage:
-        reasoning_content = (
-            "".join(self.reasoning_content_chunks)
-            if self.reasoning_content_chunks
-            else None
-        )
         return AnthropicConfig().calculate_usage(
             usage_object=cast(dict, anthropic_usage_chunk),
-            reasoning_content=reasoning_content,
+            reasoning_content=None,
             speed=self.speed,
         )
 
@@ -667,13 +658,10 @@ class ModelResponseIterator:
             "thinking" in content_block["delta"]
             or "signature" in content_block["delta"]
         ):
-            thinking_content = content_block["delta"].get("thinking")
-            if isinstance(thinking_content, str) and thinking_content:
-                self.reasoning_content_chunks.append(thinking_content)
             thinking_blocks = [
                 ChatCompletionThinkingBlock(
                     type="thinking",
-                    thinking=thinking_content or "",
+                    thinking=content_block["delta"].get("thinking") or "",
                     signature=str(content_block["delta"].get("signature") or ""),
                 )
             ]

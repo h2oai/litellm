@@ -50,7 +50,6 @@ _PROXY_ADMIN_VIEW_ONLY_BLOCKED_ROUTES = frozenset(
         KeyManagementRoutes.KEY_BLOCK.value,
         KeyManagementRoutes.KEY_UNBLOCK.value,
         KeyManagementRoutes.KEY_BULK_UPDATE.value,
-        KeyManagementRoutes.TEAM_KEY_BULK_UPDATE.value,
     ]
 )
 
@@ -62,11 +61,7 @@ _PROXY_ADMIN_VIEW_ONLY_BLOCKED_KEY_SUFFIXES = ("/regenerate", "/reset_spend")
 
 class RouteChecks:
     @staticmethod
-    def should_call_route(
-        route: str,
-        valid_token: UserAPIKeyAuth,
-        request: Optional[Request] = None,
-    ):
+    def should_call_route(route: str, valid_token: UserAPIKeyAuth):
         """
         Check if management route is disabled and raise exception
         """
@@ -81,15 +76,13 @@ class RouteChecks:
 
         # Check if Virtual Key is allowed to call the route - Applies to all Roles
         RouteChecks.is_virtual_key_allowed_to_call_route(
-            route=route, valid_token=valid_token, request=request
+            route=route, valid_token=valid_token
         )
         return True
 
     @staticmethod
     def is_virtual_key_allowed_to_call_route(
-        route: str,
-        valid_token: UserAPIKeyAuth,
-        request: Optional[Request] = None,
+        route: str, valid_token: UserAPIKeyAuth
     ) -> bool:
         """
         Raises Exception if Virtual Key is not allowed to call the route
@@ -133,21 +126,6 @@ class RouteChecks:
 
                         if InitPassThroughEndpointHelpers.is_registered_pass_through_route(
                             route=route
-                        ):
-                            return True
-
-                        # Method-aware carve-out: allow GET on the two
-                        # read-only MCP-server discovery endpoints
-                        # (`/v1/mcp/server` and `/v1/mcp/server/{server_id}`)
-                        # so virtual keys with allowed_routes=["llm_api_routes"]
-                        # can list/inspect MCP servers. The GET handlers in
-                        # mcp_management_endpoints.py sanitize the response
-                        # for restricted virtual keys (stripping url,
-                        # headers, env, credentials). POST/PUT/DELETE on
-                        # these paths are admin-only management writes and
-                        # are intentionally not covered.
-                        if RouteChecks._is_get_mcp_server_discovery_route(
-                            route=route, request=request
                         ):
                             return True
 
@@ -416,36 +394,9 @@ class RouteChecks:
             return True
 
         for _llm_passthrough_route in LiteLLMRoutes.mapped_pass_through_routes.value:
-            if route == _llm_passthrough_route or route.startswith(
-                _llm_passthrough_route + "/"
-            ):
+            if _llm_passthrough_route in route:
                 return True
         return False
-
-    @staticmethod
-    def _is_get_mcp_server_discovery_route(
-        route: str, request: Optional[Request]
-    ) -> bool:
-        """
-        Returns True if `request` is a GET against one of the two read-only
-        MCP-server discovery paths:
-
-        - GET `/v1/mcp/server`               (list)
-        - GET `/v1/mcp/server/{server_id}`   (single server, single segment)
-
-        Multi-segment paths (`/v1/mcp/server/{id}/approve`, etc.) and any
-        non-GET method return False, so admin-only management writes on the
-        same path prefix are not reachable through this carve-out.
-        """
-        if request is None or request.method.upper() != "GET":
-            return False
-        if route == "/v1/mcp/server":
-            return True
-        prefix = "/v1/mcp/server/"
-        if not route.startswith(prefix):
-            return False
-        remainder = route[len(prefix) :]
-        return bool(remainder) and "/" not in remainder
 
     @staticmethod
     def is_management_route(route: str) -> bool:
@@ -673,11 +624,7 @@ class RouteChecks:
         Returns:
             bool: True if `thread` or `assistant` is in the request path, False otherwise
         """
-        # Inline import — auth_utils participates in a proxy import cycle.
-        from .auth_utils import get_request_route  # noqa: PLC0415
-
-        route = get_request_route(request)
-        if "thread" in route or "assistant" in route:
+        if "thread" in request.url.path or "assistant" in request.url.path:
             return True
         return False
 
@@ -724,7 +671,6 @@ class RouteChecks:
             "/key/service-account/generate",
             "/key/block",
             "/key/unblock",
-            "/team/key/bulk_update",
         ]
     )
 

@@ -14,7 +14,6 @@ from litellm import _custom_logger_compatible_callbacks_literal
 from litellm.integrations.agentops import AgentOps
 from litellm.integrations.anthropic_cache_control_hook import AnthropicCacheControlHook
 from litellm.integrations.argilla import ArgillaLogger
-from litellm.integrations.azure_sentinel.azure_sentinel import AzureSentinelLogger
 from litellm.integrations.azure_storage.azure_storage import AzureBlobStorageLogger
 from litellm.integrations.bitbucket import BitBucketPromptManager
 from litellm.integrations.braintrust_logging import BraintrustLogger
@@ -74,7 +73,6 @@ class CustomLoggerRegistry:
         "opik": OpikLogger,
         "argilla": ArgillaLogger,
         "opentelemetry": OpenTelemetry,
-        "azure_sentinel": AzureSentinelLogger,
         "azure_storage": AzureBlobStorageLogger,
         "humanloop": HumanloopLogger,
         # OTEL compatible loggers

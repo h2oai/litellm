@@ -13,7 +13,6 @@ from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
 from litellm.llms.ovhcloud.utils import OVHCloudException
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
-
 from litellm.types.llms.openai import AllMessageValues
 
 
@@ -99,16 +98,10 @@ class OVHCloudChatCompletionStreamingHandler(BaseModelResponseIterator):
 
             new_choices = []
             for choice in chunk["choices"]:
-                if "delta" in choice:
-                    delta = choice["delta"]
-                    # OVHCloud field migration (deadline: 2026-05-11):
-                    # `reasoning_content` is replaced by `reasoning`.
-                    # Normalise to `reasoning_content` so downstream consumers
-                    # see a consistent key during the transition window.
-                    reasoning_new = delta.get("reasoning")
-                    reasoning_legacy = delta.get("reasoning_content")
-                    if reasoning_new is not None and reasoning_legacy is None:
-                        delta["reasoning_content"] = reasoning_new
+                if "delta" in choice and "reasoning" in choice["delta"]:
+                    choice["delta"]["reasoning_content"] = choice["delta"].get(
+                        "reasoning"
+                    )
                 new_choices.append(choice)
 
             return ModelResponseStream(

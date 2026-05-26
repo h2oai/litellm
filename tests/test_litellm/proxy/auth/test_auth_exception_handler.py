@@ -140,7 +140,6 @@ async def test_handle_authentication_error_budget_exceeded():
         )
 
     assert exc_info.value.type == ProxyErrorTypes.budget_exceeded
-    assert int(exc_info.value.code) == status.HTTP_429_TOO_MANY_REQUESTS
 
 
 @pytest.mark.asyncio

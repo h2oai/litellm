@@ -1,22 +1,9 @@
-from functools import lru_cache
-from typing import Any, Dict, FrozenSet, List, cast, get_type_hints
+from typing import Any, Dict, List, cast, get_type_hints
 
 from litellm.types.llms.anthropic import AnthropicMessagesRequestOptionalParams
 from litellm.types.llms.anthropic_messages.anthropic_response import (
     AnthropicMessagesResponse,
 )
-
-
-@lru_cache(maxsize=1)
-def _anthropic_messages_optional_param_keys() -> FrozenSet[str]:
-    """
-    Valid AnthropicMessagesRequestOptionalParams keys.
-
-    ``typing.get_type_hints`` is ~80us/call and this TypedDict is static, so
-    resolving it once per process instead of once per request removes a fixed
-    full-pass cost from the /v1/messages request-parse path.
-    """
-    return frozenset(get_type_hints(AnthropicMessagesRequestOptionalParams).keys())
 
 
 class AnthropicMessagesRequestUtils:
@@ -33,7 +20,7 @@ class AnthropicMessagesRequestUtils:
         Returns:
             AnthropicMessagesRequestOptionalParams instance with only the valid parameters
         """
-        valid_keys = _anthropic_messages_optional_param_keys()
+        valid_keys = get_type_hints(AnthropicMessagesRequestOptionalParams).keys()
         filtered_params = {
             k: v for k, v in params.items() if k in valid_keys and v is not None
         }

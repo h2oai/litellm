@@ -29,9 +29,7 @@ import {
   getGuardrailLogoAndName,
   guardrail_provider_map,
   skipSystemMessageToChoice,
-  skipToolMessageToChoice,
   type SkipSystemMessageChoice,
-  type SkipToolMessageChoice,
 } from "./guardrail_info_helpers";
 import GuardrailOptionalParams from "./guardrail_optional_params";
 import GuardrailProviderFields from "./guardrail_provider_fields";
@@ -216,15 +214,11 @@ const GuardrailInfoView: React.FC<GuardrailInfoProps> = ({ guardrailId, onClose,
     if (guardrailData && form) {
       const lp = { ...(guardrailData.litellm_params || {}) };
       delete lp.skip_system_message_in_guardrail;
-      delete lp.skip_tool_message_in_guardrail;
       form.setFieldsValue({
         guardrail_name: guardrailData.guardrail_name,
         ...lp,
         skip_system_message_choice: skipSystemMessageToChoice(
           guardrailData.litellm_params?.skip_system_message_in_guardrail,
-        ),
-        skip_tool_message_choice: skipToolMessageToChoice(
-          guardrailData.litellm_params?.skip_tool_message_in_guardrail,
         ),
         guardrail_info: guardrailData.guardrail_info ? JSON.stringify(guardrailData.guardrail_info, null, 2) : "",
         // Include any optional_params if they exist
@@ -305,20 +299,6 @@ const GuardrailInfoView: React.FC<GuardrailInfoProps> = ({ guardrailId, onClose,
           updateData.litellm_params.skip_system_message_in_guardrail = true;
         } else {
           updateData.litellm_params.skip_system_message_in_guardrail = false;
-        }
-      }
-
-      const prevSkipToolChoice = skipToolMessageToChoice(
-        guardrailData.litellm_params?.skip_tool_message_in_guardrail,
-      );
-      const nextSkipToolChoice = values.skip_tool_message_choice as SkipToolMessageChoice | undefined;
-      if (nextSkipToolChoice !== undefined && nextSkipToolChoice !== prevSkipToolChoice) {
-        if (nextSkipToolChoice === "inherit") {
-          updateData.litellm_params.skip_tool_message_in_guardrail = null;
-        } else if (nextSkipToolChoice === "yes") {
-          updateData.litellm_params.skip_tool_message_in_guardrail = true;
-        } else {
-          updateData.litellm_params.skip_tool_message_in_guardrail = false;
         }
       }
 
@@ -694,14 +674,10 @@ const GuardrailInfoView: React.FC<GuardrailInfoProps> = ({ guardrailId, onClose,
                       ...(() => {
                         const lp = { ...(guardrailData.litellm_params || {}) };
                         delete lp.skip_system_message_in_guardrail;
-                        delete lp.skip_tool_message_in_guardrail;
                         return lp;
                       })(),
                       skip_system_message_choice: skipSystemMessageToChoice(
                         guardrailData.litellm_params?.skip_system_message_in_guardrail,
-                      ),
-                      skip_tool_message_choice: skipToolMessageToChoice(
-                        guardrailData.litellm_params?.skip_tool_message_in_guardrail,
                       ),
                       guardrail_info: guardrailData.guardrail_info
                         ? JSON.stringify(guardrailData.guardrail_info, null, 2)
@@ -732,18 +708,6 @@ const GuardrailInfoView: React.FC<GuardrailInfoProps> = ({ guardrailId, onClose,
                       label="Skip system messages in guardrail"
                       name="skip_system_message_choice"
                       tooltip="Unified guardrails: omit role: system from guardrail input (LLM still gets full messages). Use global default follows litellm_settings.skip_system_message_in_guardrail."
-                    >
-                      <Select>
-                        <Select.Option value="inherit">Use global default</Select.Option>
-                        <Select.Option value="yes">Yes — exclude from guardrail scan</Select.Option>
-                        <Select.Option value="no">No — always include in scan</Select.Option>
-                      </Select>
-                    </Form.Item>
-
-                    <Form.Item
-                      label="Skip tool messages in guardrail"
-                      name="skip_tool_message_choice"
-                      tooltip="Unified guardrails: omit role: tool from guardrail input (LLM still gets full messages). Use global default follows litellm_settings.skip_tool_message_in_guardrail."
                     >
                       <Select>
                         <Select.Option value="inherit">Use global default</Select.Option>

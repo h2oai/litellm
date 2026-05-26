@@ -29,7 +29,6 @@ export interface TeamListCallOptions {
   organizationID?: string | null;
   teamID?: string | null;
   team_alias?: string | null;
-  search?: string | null;
   userID?: string | null;
   sortBy?: string | null;
   sortOrder?: string | null;
@@ -53,7 +52,6 @@ export const teamListCall = async (
         team_id: options.teamID,
         organization_id: options.organizationID,
         team_alias: options.team_alias,
-        search: options.search,
         user_id: options.userID,
         page,
         page_size: pageSize,
@@ -180,7 +178,6 @@ const deletedTeamListCall = async (
         team_id: options.teamID,
         organization_id: options.organizationID,
         team_alias: options.team_alias,
-        search: options.search,
         user_id: options.userID,
         page,
         page_size: pageSize,

@@ -930,7 +930,7 @@ def test_image_generation_openai():
 
         response = litellm.image_generation(
             prompt="A cute baby sea otter",
-            model="openai/gpt-image-1",
+            model="openai/dall-e-3",
             api_key=os.getenv("OPENAI_API_KEY"),
         )
 
@@ -948,7 +948,7 @@ def test_image_generation_openai():
         try:
             response = litellm.image_generation(
                 prompt="A cute baby sea otter",
-                model="gpt-image-1",
+                model="dall-e-2",
                 api_key="my-bad-api-key",
             )
         except Exception:
@@ -1125,7 +1125,7 @@ def test_standard_logging_payload_audio(turn_off_message_logging, stream):
     ) as mock_client:
         try:
             response = litellm.completion(
-                model="gpt-audio-1.5",
+                model="gpt-4o-audio-preview",
                 modalities=["text", "audio"],
                 audio={"voice": "alloy", "format": "pcm16"},
                 messages=[
@@ -1134,14 +1134,8 @@ def test_standard_logging_payload_audio(turn_off_message_logging, stream):
                 stream=stream,
             )
         except Exception as e:
-            err = str(e).lower()
-            if (
-                "model_not_found" in err
-                or "does not exist" in err
-                or "openai-internal" in err
-            ):
-                pytest.skip(f"Skipping - upstream gpt-audio-1.5 unavailable: {e}")
-            raise
+            if "openai-internal" in str(e):
+                pytest.skip("Skipping test due to openai-internal error")
 
         if stream:
             for chunk in response:

@@ -312,10 +312,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                 )
 
         ####### get required params for all anthropic messages requests ######
-        # Lazy %s: the f-string previously stringified the entire messages
-        # payload on every request regardless of log level (a full scan of the
-        # request body on the hot path). Defer it to when DEBUG is enabled.
-        verbose_logger.debug("TRANSFORMATION DEBUG - Messages: %s", messages)
+        verbose_logger.debug(f"TRANSFORMATION DEBUG - Messages: {messages}")
 
         # Auto-strip advisor blocks from history if advisor tool is absent.
         # Prevents Anthropic 400: advisor_tool_result in history requires advisor tool.

@@ -57,10 +57,7 @@ vi.mock("./EndpointUsage/EndpointUsage", () => ({
 
 vi.mock("./UsageViewSelect/UsageViewSelect", async () => {
   const React = await import("react");
-  const UsageViewSelect = ({ value, onChange, canViewTagUsage = false }: any) => {
-    const tagOption = canViewTagUsage
-      ? React.createElement("option", { value: "tag" }, "Tag Usage")
-      : null;
+  const UsageViewSelect = ({ value, onChange }: any) => {
     return React.createElement(
       "select",
       {
@@ -73,7 +70,7 @@ vi.mock("./UsageViewSelect/UsageViewSelect", async () => {
       React.createElement("option", { value: "team" }, "Team Usage"),
       React.createElement("option", { value: "organization" }, "Organization Usage"),
       React.createElement("option", { value: "customer" }, "Customer Usage"),
-      tagOption,
+      React.createElement("option", { value: "tag" }, "Tag Usage"),
       React.createElement("option", { value: "agent" }, "Agent Usage"),
       React.createElement("option", { value: "user-agent-activity" }, "User Agent Activity"),
     );
@@ -640,29 +637,6 @@ describe("UsagePage", () => {
       const entityUsageElements = screen.getAllByText("Entity Usage");
       expect(entityUsageElements.length).toBeGreaterThan(0);
     });
-  });
-
-  it("should show tag usage selector option for internal users", async () => {
-    mockUseAuthorized.mockReturnValue({
-      isLoading: false,
-      isAuthorized: true,
-      token: "mock-token",
-      accessToken: "test-token",
-      userId: "user-123",
-      userEmail: "test@example.com",
-      userRole: "internal_user",
-      premiumUser: true,
-      disabledPersonalKeyCreation: false,
-      showSSOBanner: false,
-    });
-
-    renderWithProviders(<UsagePage {...defaultProps} />);
-
-    await waitFor(() => {
-      expect(mockUserDailyActivityAggregatedCall).toHaveBeenCalled();
-    });
-
-    expect(screen.getByRole("option", { name: "Tag Usage" })).toBeInTheDocument();
   });
 
   it("should show organization usage banner and view for admins", async () => {

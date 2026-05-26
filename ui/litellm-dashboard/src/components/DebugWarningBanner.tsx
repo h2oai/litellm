@@ -2,14 +2,10 @@
 
 import React from "react";
 import { Alert } from "antd";
-import { useHealthReadinessDetails } from "@/app/(dashboard)/hooks/healthReadiness/useHealthReadinessDetails";
+import { useHealthReadiness } from "@/app/(dashboard)/hooks/healthReadiness/useHealthReadiness";
 
-interface DebugWarningBannerProps {
-  accessToken: string | null;
-}
-
-export const DebugWarningBanner: React.FC<DebugWarningBannerProps> = ({ accessToken }) => {
-  const { data: healthData } = useHealthReadinessDetails(accessToken);
+export const DebugWarningBanner: React.FC = () => {
+  const { data: healthData } = useHealthReadiness();
 
   // Only show banner if detailed debug mode is explicitly enabled
   if (!healthData?.is_detailed_debug) {

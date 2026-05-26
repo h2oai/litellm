@@ -20,6 +20,7 @@ import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
+from respx import MockRouter
 import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -994,15 +995,15 @@ async def test_aimg_gen_on_router():
     try:
         model_list = [
             {
-                "model_name": "gpt-image-1",
+                "model_name": "dall-e-3",
                 "litellm_params": {
-                    "model": "gpt-image-1",
+                    "model": "dall-e-3",
                 },
             }
         ]
         router = Router(model_list=model_list, num_retries=3)
         response = await router.aimage_generation(
-            model="gpt-image-1", prompt="A cute baby sea otter"
+            model="dall-e-3", prompt="A cute baby sea otter"
         )
         print(response)
         assert len(response.data) > 0
@@ -1029,15 +1030,15 @@ def test_img_gen_on_router():
     try:
         model_list = [
             {
-                "model_name": "gpt-image-1",
+                "model_name": "dall-e-3",
                 "litellm_params": {
-                    "model": "gpt-image-1",
+                    "model": "dall-e-3",
                 },
             }
         ]
         router = Router(model_list=model_list)
         response = router.image_generation(
-            model="gpt-image-1", prompt="A cute baby sea otter"
+            model="dall-e-3", prompt="A cute baby sea otter"
         )
         print(response)
         assert len(response.data) > 0

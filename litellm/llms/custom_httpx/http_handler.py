@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import inspect
 import os
 import socket
@@ -133,11 +132,6 @@ headers = get_default_headers()
 _DEFAULT_TIMEOUT = httpx.Timeout(
     timeout=COMPLETION_HTTP_FALLBACK_SECONDS,
     connect=HTTP_HANDLER_CONNECT_TIMEOUT_SECONDS,
-)
-_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS = 5.0
-_STREAMING_ERROR_BODY_READ_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=50,
-    thread_name_prefix="litellm-streaming-error-body-read",
 )
 
 
@@ -392,30 +386,17 @@ def _safe_get_response_text(response: httpx.Response) -> str:
         return ""
 
 
-async def _safe_aread_response(
-    response: httpx.Response, timeout: Optional[float] = None
-) -> bytes:
+async def _safe_aread_response(response: httpx.Response) -> bytes:
     """Safely read async response body, falling back to empty bytes on errors."""
     try:
-        if timeout is not None:
-            return await asyncio.wait_for(response.aread(), timeout=timeout)
         return await response.aread()
     except Exception:
         return b""
 
 
-def _safe_read_response(
-    response: httpx.Response, timeout: Optional[float] = None
-) -> bytes:
+def _safe_read_response(response: httpx.Response) -> bytes:
     """Safely read sync response body, falling back to empty bytes on errors."""
     try:
-        if timeout is not None:
-            future = _STREAMING_ERROR_BODY_READ_EXECUTOR.submit(response.read)
-            try:
-                return future.result(timeout=timeout)
-            except Exception:
-                response.close()
-                return b""
         return response.read()
     except Exception:
         return b""
@@ -424,19 +405,8 @@ def _safe_read_response(
 def _raise_masked_sync_error(e: httpx.HTTPStatusError, stream: bool) -> None:
     """Raise a MaskedHTTPStatusError for sync HTTP handlers."""
     if stream:
-        try:
-            _body = mask_sensitive_info(
-                _safe_read_response(
-                    e.response,
-                    timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
-                )
-            )
-            raise MaskedHTTPStatusError(e, message=_body, text=_body) from None
-        finally:
-            try:
-                e.response.close()
-            except Exception:
-                pass
+        _body = mask_sensitive_info(_safe_read_response(e.response))
+        raise MaskedHTTPStatusError(e, message=_body, text=_body) from None
     _text = mask_sensitive_info(_safe_get_response_text(e.response))
     raise MaskedHTTPStatusError(e, message=_text, text=_text) from None
 
@@ -444,19 +414,8 @@ def _raise_masked_sync_error(e: httpx.HTTPStatusError, stream: bool) -> None:
 async def _raise_masked_async_error(e: httpx.HTTPStatusError, stream: bool) -> None:
     """Raise a MaskedHTTPStatusError for async HTTP handlers."""
     if stream:
-        try:
-            _body = mask_sensitive_info(
-                await _safe_aread_response(
-                    e.response,
-                    timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
-                )
-            )
-            raise MaskedHTTPStatusError(e, message=_body, text=_body) from None
-        finally:
-            try:
-                await e.response.aclose()
-            except Exception:
-                pass
+        _body = mask_sensitive_info(await _safe_aread_response(e.response))
+        raise MaskedHTTPStatusError(e, message=_body, text=_body) from None
     _text = mask_sensitive_info(_safe_get_response_text(e.response))
     raise MaskedHTTPStatusError(e, message=_text, text=_text) from None
 
@@ -485,16 +444,11 @@ class MaskedHTTPStatusError(httpx.HTTPStatusError):
             if k.lower() not in ("content-encoding", "content-length")
         }
 
-        try:
-            request_content = original_error.request.content
-        except httpx.RequestNotRead:
-            request_content = b""
-
         masked_request = httpx.Request(
             method=original_error.request.method,
             url=masked_url,
             headers=original_error.request.headers,
-            content=request_content,
+            content=original_error.request.content,
         )
 
         super().__init__(

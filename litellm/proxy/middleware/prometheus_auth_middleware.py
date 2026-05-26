@@ -79,10 +79,7 @@ class PrometheusAuthMiddleware:
                 # Send 401 response directly via ASGI protocol
                 error_message = getattr(e, "message", str(e))
                 body = json.dumps(
-                    f"Unauthorized access to metrics endpoint: {error_message} "
-                    f"To allow unauthenticated access, set "
-                    f"`litellm_settings.require_auth_for_metrics_endpoint: false` "
-                    f"in your proxy_config.yaml."
+                    f"Unauthorized access to metrics endpoint: {error_message}"
                 ).encode("utf-8")
                 await send(
                     {

@@ -3,7 +3,6 @@ import { Modal, Tooltip, Form, Select, Input, Switch, Collapse } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import { Button, TextInput } from "@tremor/react";
 import { createMCPServer, registerMCPServer } from "../networking";
-import { setToken } from "@/utils/mcpTokenStore";
 import { AUTH_TYPE, DiscoverableMCPServer, OAUTH_FLOW, MCPServer, MCPServerCostInfo, TRANSPORT } from "./types";
 import OAuthFormFields from "./OAuthFormFields";
 import MCPServerCostConfig from "./mcp_server_cost_config";
@@ -25,7 +24,6 @@ export const mcpLogoImg = `${asset_logos_folder}mcp_logo.png`;
 
 interface CreateMCPServerProps {
   userRole: string;
-  userID?: string | null;
   accessToken: string | null;
   onCreateSuccess: (newMcpServer: MCPServer) => void;
   isModalVisible: boolean;
@@ -49,7 +47,6 @@ const reduceStaticHeaders = (list: unknown): Record<string, string> => {
 };
 
 const CreateMCPServer: React.FC<CreateMCPServerProps> = ({
-  userID,
   userRole,
   accessToken,
   onCreateSuccess,
@@ -287,7 +284,6 @@ const CreateMCPServer: React.FC<CreateMCPServerProps> = ({
         credentials: credentialValues,
         allow_all_keys: allowAllKeysRaw,
         available_on_public_internet: availableOnPublicInternetRaw,
-        delegate_auth_to_upstream: delegateAuthToUpstreamRaw,
         token_validation_json: rawTokenValidationJson,
         ...restValues
       } = values;
@@ -392,7 +388,6 @@ const CreateMCPServer: React.FC<CreateMCPServerProps> = ({
         tool_name_to_description: Object.keys(toolNameToDescription).length > 0 ? toolNameToDescription : null,
         allow_all_keys: Boolean(allowAllKeysRaw),
         available_on_public_internet: Boolean(availableOnPublicInternetRaw),
-        delegate_auth_to_upstream: Boolean(delegateAuthToUpstreamRaw),
         static_headers: staticHeaders,
         ...(tokenValidation !== null && { token_validation: tokenValidation }),
       };
@@ -411,21 +406,6 @@ const CreateMCPServer: React.FC<CreateMCPServerProps> = ({
         const response = isAdmin
           ? await createMCPServer(accessToken, payload)
           : await registerMCPServer(accessToken, payload);
-
-        // Cache the OAuth token in sessionStorage so the Tools tab can use it
-        // immediately without re-authenticating.  No backend DB write.
-        if (oauthTokenResponse?.access_token && response?.server_id) {
-          setToken(
-            response.server_id,
-            {
-              access_token: oauthTokenResponse.access_token,
-              expires_in: oauthTokenResponse.expires_in,
-              refresh_token: oauthTokenResponse.refresh_token,
-              token_type: oauthTokenResponse.token_type,
-            },
-            userID,
-          );
-        }
 
         NotificationsManager.success(
           isAdmin

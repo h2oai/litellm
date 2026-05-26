@@ -101,9 +101,7 @@ async def test_openai_realtime_direct_call_no_intent():
 
     try:
         await litellm._arealtime(
-            # OpenAI shut down the gpt-4o-realtime-preview family (incl. the
-            # undated alias) on 2026-05-07; gpt-realtime is the GA successor.
-            model="openai/gpt-realtime",
+            model="openai/gpt-4o-realtime-preview-2024-10-01",
             websocket=websocket_client,
             api_key=os.environ.get("OPENAI_API_KEY"),
             timeout=60,
@@ -251,16 +249,14 @@ async def test_openai_realtime_direct_call_with_intent():
     websocket_client = RealTimeWebSocketClient()
     caught_exception = None
 
-    # OpenAI shut down the gpt-4o-realtime-preview family (incl. the undated
-    # alias) on 2026-05-07; gpt-realtime is the GA successor.
     query_params: RealtimeQueryParams = {
-        "model": "openai/gpt-realtime",
+        "model": "openai/gpt-4o-realtime-preview-2024-10-01",
         "intent": "chat",
     }
 
     try:
         await litellm._arealtime(
-            model="openai/gpt-realtime",
+            model="openai/gpt-4o-realtime-preview-2024-10-01",
             websocket=websocket_client,
             api_key=os.environ.get("OPENAI_API_KEY"),
             query_params=query_params,
@@ -335,7 +331,7 @@ def test_realtime_query_params_construction():
     from litellm.types.realtime import RealtimeQueryParams
 
     # Test case 1: intent is None (should not be included)
-    model = "gpt-4o-realtime-preview"
+    model = "gpt-4o-realtime-preview-2024-10-01"
     intent = None
 
     query_params: RealtimeQueryParams = {"model": model}
@@ -373,17 +369,17 @@ async def test_realtime_query_params_use_normalized_model_name(monkeypatch):
     )
 
     def fake_get_llm_provider(model, api_base=None, api_key=None):
-        return ("gpt-4o-realtime-preview", "openai", None, None)
+        return ("gpt-4o-realtime-preview-2024-10-01", "openai", None, None)
 
     monkeypatch.setattr(realtime_main, "get_llm_provider", fake_get_llm_provider)
 
     query_params: RealtimeQueryParams = {
-        "model": "openai/gpt-4o-realtime-preview",
+        "model": "openai/gpt-4o-realtime-preview-2024-10-01",
         "intent": "chat",
     }
 
     await realtime_main._arealtime(
-        model="openai/gpt-4o-realtime-preview",
+        model="openai/gpt-4o-realtime-preview-2024-10-01",
         websocket=MagicMock(),
         api_key="sk-test",
         query_params=query_params,
@@ -391,5 +387,7 @@ async def test_realtime_query_params_use_normalized_model_name(monkeypatch):
     )
 
     called_kwargs = mock_async_realtime.call_args.kwargs
-    assert called_kwargs["query_params"]["model"] == "gpt-4o-realtime-preview"
+    assert (
+        called_kwargs["query_params"]["model"] == "gpt-4o-realtime-preview-2024-10-01"
+    )
     assert called_kwargs["query_params"]["intent"] == "chat"
