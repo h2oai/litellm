@@ -36,6 +36,10 @@ class GoogleAIStudioTokenCounter:
 
         cleaned_contents = copy.deepcopy(contents)
 
+        # FIX: Check if contents is None before iterating
+        if cleaned_contents is None:
+            return None
+
         for content in cleaned_contents:
             parts = content["parts"]
             for part in parts:
