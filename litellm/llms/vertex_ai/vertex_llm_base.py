@@ -5,6 +5,7 @@ Handles Authentication and generating request urls for Vertex AI and Google AI S
 """
 
 import asyncio
+import base64
 import json
 import os
 import threading
@@ -118,7 +119,25 @@ class VertexBase:
                         with open(credentials) as f:
                             json_obj = json.load(f)
                     else:
-                        json_obj = json.loads(credentials)
+                        # Try to parse as JSON first
+                        try:
+                            json_obj = json.loads(credentials)
+                        except json.JSONDecodeError:
+                            # If JSON parsing fails, try base64 decoding
+                            try:
+                                verbose_logger.debug(
+                                    "Vertex: JSON parsing failed, attempting base64 decode"
+                                )
+                                decoded_credentials = base64.b64decode(credentials).decode('utf-8')
+                                json_obj = json.loads(decoded_credentials)
+                                verbose_logger.debug(
+                                    "Vertex: Successfully decoded base64 credentials"
+                                )
+                            except Exception as base64_error:
+                                verbose_logger.debug(
+                                    "Vertex: Base64 decode failed: %s", str(base64_error)
+                                )
+                                raise
                 except Exception as e:
                     raise Exception(
                         "Unable to load vertex credentials from environment. "
