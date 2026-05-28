@@ -238,6 +238,70 @@ async def add_shared_session_to_data(data: dict) -> None:
             pass
 
 
+async def reload_models_on_demand(
+    llm_router: Optional[LitellmRouter],
+    model_name: str,
+) -> bool:
+    """
+    Attempt to reload models from database when a model is not found.
+    This allows newly registered models to be available without waiting for periodic polling.
+
+    Args:
+        llm_router: The LiteLLM router instance
+        model_name: The model name that was not found
+
+    Returns:
+        True if reload was attempted, False otherwise
+    """
+    if llm_router is None:
+        print(f"🔄 LAZY_RELOAD: llm_router is None for model '{model_name}'", flush=True)
+        return False
+
+    print(f"🔄 LAZY_RELOAD: Attempting reload for model '{model_name}'", flush=True)
+
+    try:
+        # Import here to avoid circular dependencies
+        from litellm.proxy.proxy_server import (
+            prisma_client,
+            proxy_config,
+            proxy_logging_obj,
+        )
+
+        if prisma_client is None:
+            print(f"❌ LAZY_RELOAD: prisma_client is None", flush=True)
+            return False
+
+        if proxy_config is None:
+            print(f"❌ LAZY_RELOAD: proxy_config is None", flush=True)
+            return False
+
+        from litellm._logging import verbose_proxy_logger
+
+        verbose_proxy_logger.info(
+            f"Model '{model_name}' not found in router. Attempting to reload models from database..."
+        )
+        print(f"📊 LAZY_RELOAD: Calling proxy_config.add_deployment()", flush=True)
+
+        # Trigger reload from database
+        await proxy_config.add_deployment(
+            prisma_client=prisma_client,
+            proxy_logging_obj=proxy_logging_obj,
+        )
+
+        verbose_proxy_logger.info(
+            f"Model reload completed. Retrying request for model '{model_name}'..."
+        )
+        print(f"✅ LAZY_RELOAD: Reload successful for model '{model_name}'", flush=True)
+        return True
+    except Exception as e:
+        # Log the error so we can see what went wrong
+        print(f"❌ LAZY_RELOAD: Exception during reload: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+
 async def route_request(  # noqa: PLR0915 - Complex routing function, refactoring tracked separately
     data: dict,
     llm_router: Optional[LitellmRouter],
@@ -354,6 +418,7 @@ async def route_request(  # noqa: PLR0915 - Complex routing function, refactorin
 
     team_id = get_team_id_from_data(data)
     router_model_names = llm_router.model_names if llm_router is not None else []
+    model_reloaded = False  # Track if we've already tried reloading
 
     # Preprocess Google GenAI generate content requests
     if route_type in ["agenerate_content", "agenerate_content_stream"]:
@@ -530,7 +595,30 @@ async def route_request(  # noqa: PLR0915 - Complex routing function, refactorin
         ):
             return getattr(llm_router, f"{route_type}")(**data)
 
-        elif data["model"] not in router_model_names:
+        # Model not found - try reloading from DB before failing
+        elif data.get("model") not in router_model_names and not model_reloaded:
+            print(f"🔍 LAZY_RELOAD: Model '{data.get('model')}' not in router_model_names", flush=True)
+            # Attempt to reload models from database
+            reload_success = await reload_models_on_demand(
+                llm_router=llm_router,
+                model_name=data.get("model", ""),
+            )
+
+            if reload_success:
+                # Mark that we've reloaded to prevent infinite recursion
+                model_reloaded = True
+                # Refresh model names after reload
+                router_model_names = llm_router.model_names if llm_router is not None else []
+                print(f"🔄 LAZY_RELOAD: Refreshed model_names, count={len(router_model_names)}", flush=True)
+
+                # Retry the routing logic after reload
+                if data["model"] in router_model_names or llm_router.has_model_id(data["model"]):
+                    print(f"✅ LAZY_RELOAD: Model '{data['model']}' found after reload, routing request", flush=True)
+                    return getattr(llm_router, f"{route_type}")(**data)
+                else:
+                    print(f"❌ LAZY_RELOAD: Model '{data['model']}' still not found after reload", flush=True)
+
+            # If reload didn't help or wasn't attempted, check other options
             # Check wildcards before checking deployment_names
             # Priority: 1. Exact model_name match, 2. Wildcard match, 3. deployment_names match
             if llm_router.router_general_settings.pass_through_all_models:
