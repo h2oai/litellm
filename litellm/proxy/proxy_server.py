@@ -4904,6 +4904,11 @@ class ProxyConfig:
                         _value = decrypt_value_helper(
                             value=v, key=k, return_original_value=True
                         )
+                        # FIX: Resolve os.environ/ references after decryption
+                        if _value.startswith("os.environ/"):
+                            resolved_value = get_secret(_value)
+                            if resolved_value is not None:
+                                _value = resolved_value
                         _litellm_params[k] = _value
                 _litellm_params = LiteLLM_Params(**_litellm_params)
 
