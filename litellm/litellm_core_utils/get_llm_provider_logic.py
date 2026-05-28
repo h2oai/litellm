@@ -373,9 +373,7 @@ def get_llm_provider(  # noqa: PLR0915
                         dynamic_api_key, str
                     ):
                         raise Exception(
-                            "dynamic_api_key needs to be a string. dynamic_api_key={}".format(
-                                dynamic_api_key
-                            )
+                            "dynamic_api_key needs to be a string."
                         )
                     return model, custom_llm_provider, dynamic_api_key, api_base  # type: ignore
 
@@ -519,9 +517,7 @@ def get_llm_provider(  # noqa: PLR0915
             )
         if dynamic_api_key is not None and not isinstance(dynamic_api_key, str):
             raise Exception(
-                "dynamic_api_key needs to be a string. dynamic_api_key={}".format(
-                    dynamic_api_key
-                )
+                "dynamic_api_key needs to be a string."
             )
         return model, custom_llm_provider, dynamic_api_key, api_base
     except Exception as e:
@@ -1000,9 +996,7 @@ def _get_openai_compatible_provider_info(  # noqa: PLR0915
         raise Exception("api base needs to be a string. api_base={}".format(api_base))
     if dynamic_api_key is not None and not isinstance(dynamic_api_key, str):
         raise Exception(
-            "dynamic_api_key needs to be a string. dynamic_api_key={}".format(
-                dynamic_api_key
-            )
+            "dynamic_api_key needs to be a string."
         )
     if dynamic_api_key is None and api_key is not None:
         dynamic_api_key = api_key
