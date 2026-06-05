@@ -330,6 +330,20 @@ class AnthropicParamsFilterHook(CustomLogger):
         Anthropic-specific parameters that may be present:
         - context_management: Anthropic beta feature for context management
         - enable_caching: Custom parameter for controlling Anthropic caching hook
+        - thinking: Anthropic extended thinking parameter
+        - output_config: Anthropic adaptive-thinking effort control. LiteLLM's
+          Anthropic/Bedrock-Claude transformations map ``reasoning_effort`` to
+          ``output_config={"effort": ...}`` for Claude 4.5/4.6/4.7 / Opus 4.5.
+          The OpenAI/Azure code paths neither produce nor strip it, so if it
+          reaches an Azure deployment (e.g. via a routing/fallback group that
+          mixes Claude and Azure models, or a model-group default) Azure rejects
+          the whole request with:
+            AzureException - Unrecognized request argument supplied: output_config
+          Filtering it here keeps it Anthropic-only.
+
+        New Anthropic-only params should be added to ``anthropic_params`` below so
+        they are only ever passed through to actual Anthropic/Bedrock-Claude
+        models — never leaked to OpenAI/Azure/other providers.
         """
         if self._is_anthropic_provider(model):
             # Model is Anthropic, don't filter anything
@@ -339,6 +353,7 @@ class AnthropicParamsFilterHook(CustomLogger):
             'context_management',
             'enable_caching',  # This is handled by caching hook, but filter as safety net
             'thinking',  # Anthropic extended thinking parameter
+            'output_config',  # Anthropic adaptive-thinking effort (reasoning_effort -> output_config)
         ]
 
         removed_params = []
