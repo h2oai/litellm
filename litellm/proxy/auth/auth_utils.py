@@ -213,6 +213,12 @@ _EXTRA_BANNED_OBSERVABILITY_PARAMS: FrozenSet[str] = frozenset(
     {
         "posthog_api_url",
         "phoenix_project_name",
+        "phoenix_project_name_override",
+        # Server-reserved: written exclusively by add_user_api_key_auth_to_request_metadata
+        # from the authenticated key's database record.  A caller-supplied value
+        # would survive the server merge and let an authenticated user redirect
+        # their Arize/Phoenix telemetry into arbitrary projects.
+        "user_api_key_auth_metadata",
         "wandb_api_key",
         "weave_project_id",
     }
@@ -498,9 +504,18 @@ def route_in_additonal_public_routes(current_route: str):
 
 def get_request_route(request: Request) -> str:
     """
-    Helper to get the route from the request
+    Resolve the request route from the ASGI scope, with ``root_path`` stripped.
 
-    remove base url from path if set e.g. `/genai/chat/completions` -> `/chat/completions
+    Prefer this over ``request.url.path`` for any auth, ACL, routing, or
+    audit-log decision: Starlette reconstructs ``url.path`` by interpolating
+    the Host header into a URL string and re-parsing with ``urlsplit``, so a
+    malformed Host (e.g. ``localhost/?x=1``) collapses ``url.path`` to ``"/"``
+    while FastAPI continues to dispatch on ``scope["path"]``. ``scope["path"]``
+    is uvicorn's parse of the HTTP request line and matches the actual
+    handler, so it's the authoritative route.
+
+    Also normalizes sub-path deployments by stripping ``scope["root_path"]``
+    e.g. ``/genai/chat/completions`` -> ``/chat/completions``.
     """
     try:
         scope = request.scope
@@ -1229,7 +1244,9 @@ def _route_uses_model_routing_sources(route: str) -> bool:
 
 
 def _extract_models_from_managed_resource_id(
-    resource_id: Any, resource_id_field: Optional[str] = None
+    resource_id: Any,
+    resource_id_field: Optional[str] = None,
+    llm_router: Optional[Router] = None,
 ) -> List[str]:
     if not isinstance(resource_id, str) or not resource_id:
         return []
@@ -1286,16 +1303,18 @@ def _extract_models_from_managed_resource_id(
             )
 
             if resource_id_field == "video_id":
+                model_id = decode_video_id_with_provider(resource_id).get("model_id")
                 _append_model_candidates(
                     candidates=candidates,
-                    value=decode_video_id_with_provider(resource_id).get("model_id"),
+                    value=_resolve_model_id_with_router(model_id, llm_router),
                 )
             else:
+                model_id = decode_character_id_with_provider(resource_id).get(
+                    "model_id"
+                )
                 _append_model_candidates(
                     candidates=candidates,
-                    value=decode_character_id_with_provider(resource_id).get(
-                        "model_id"
-                    ),
+                    value=_resolve_model_id_with_router(model_id, llm_router),
                 )
         except Exception as e:
             verbose_proxy_logger.debug(
@@ -1305,11 +1324,26 @@ def _extract_models_from_managed_resource_id(
     return _dedupe_model_candidates(candidates)
 
 
+def _resolve_model_id_with_router(
+    model_id: Optional[str], llm_router: Optional[Router]
+) -> Optional[str]:
+    if model_id is None or llm_router is None:
+        return model_id
+    try:
+        return llm_router.resolve_model_name_from_model_id(model_id) or model_id
+    except Exception as e:
+        verbose_proxy_logger.debug(
+            "Unable to resolve model_id from managed resource ID: %s", str(e)
+        )
+        return model_id
+
+
 def _extract_model_candidates_from_request(
     request_data: dict,
     route: str,
     request_headers: Optional[Mapping[str, Any]] = None,
     request_query_params: Optional[Mapping[str, Any]] = None,
+    llm_router: Optional[Router] = None,
 ) -> List[str]:
     candidates: List[str] = []
     uses_model_routing_sources = _route_uses_model_routing_sources(route=route)
@@ -1359,7 +1393,9 @@ def _extract_model_candidates_from_request(
             _append_model_candidates(
                 candidates,
                 _extract_models_from_managed_resource_id(
-                    request_data.get(field), resource_id_field=field
+                    request_data.get(field),
+                    resource_id_field=field,
+                    llm_router=llm_router,
                 ),
             )
 
@@ -1381,12 +1417,14 @@ def get_model_from_request(
     route: str,
     request_headers: Optional[Mapping[str, Any]] = None,
     request_query_params: Optional[Mapping[str, Any]] = None,
+    llm_router: Optional[Router] = None,
 ) -> Optional[Union[str, List[str]]]:
     candidates = _extract_model_candidates_from_request(
         request_data=request_data,
         route=route,
         request_headers=request_headers,
         request_query_params=request_query_params,
+        llm_router=llm_router,
     )
     model = _format_model_candidates(candidates)
 

@@ -382,6 +382,62 @@ def test_get_model_from_request_extracts_video_id_model():
     )
 
 
+def test_get_model_from_request_resolves_video_id_model_with_router():
+    from litellm.types.videos.utils import encode_video_id_with_provider
+
+    provider_video_id = (
+        "projects/test-project/locations/us-central1/publishers/google/models/"
+        "veo-3.1-generate-001/operations/operation-id"
+    )
+    video_id = encode_video_id_with_provider(
+        video_id=provider_video_id,
+        provider="vertex_ai",
+        model_id="veo-3.1-generate-001",
+    )
+    llm_router = MagicMock()
+    llm_router.resolve_model_name_from_model_id.return_value = (
+        "gcp/google/veo-3.1-generate-001"
+    )
+
+    assert (
+        get_model_from_request(
+            request_data={"video_id": video_id},
+            route="/v1/videos/{video_id}",
+            llm_router=llm_router,
+        )
+        == "gcp/google/veo-3.1-generate-001"
+    )
+    llm_router.resolve_model_name_from_model_id.assert_called_once_with(
+        "veo-3.1-generate-001"
+    )
+
+
+def test_get_model_from_request_resolves_character_id_model_with_router():
+    from litellm.types.videos.utils import encode_character_id_with_provider
+
+    character_id = encode_character_id_with_provider(
+        character_id="character-provider-id",
+        provider="vertex_ai",
+        model_id="veo-3.1-generate-001",
+    )
+    llm_router = MagicMock()
+    llm_router.resolve_model_name_from_model_id.return_value = (
+        "gcp/google/veo-3.1-generate-001"
+    )
+
+    assert (
+        get_model_from_request(
+            request_data={"character_id": character_id},
+            route="/v1/videos/characters/{character_id}",
+            llm_router=llm_router,
+        )
+        == "gcp/google/veo-3.1-generate-001"
+    )
+    llm_router.resolve_model_name_from_model_id.assert_called_once_with(
+        "veo-3.1-generate-001"
+    )
+
+
 def test_get_model_from_request_only_runs_media_decoders_for_matching_fields():
     with (
         patch(
@@ -1644,6 +1700,7 @@ class TestObservabilityCallbackBans:
             "braintrust_api_key",
             "braintrust_project",
             "phoenix_project_name",
+            "phoenix_project_name_override",
             "wandb_api_key",
             "weave_project_id",
             "gcs_bucket_name",
@@ -1675,6 +1732,7 @@ class TestObservabilityCallbackBans:
             "posthog_api_url",
             "braintrust_project",
             "phoenix_project_name",
+            "phoenix_project_name_override",
         ],
     )
     def test_observability_field_in_metadata_dict_is_rejected(
