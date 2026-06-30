@@ -589,14 +589,18 @@ class AnthropicParamsFilterHook(CustomLogger):
 
         modified = []
 
-        def _convert(d: Dict[str, Any], path_label: str) -> None:
+        def _convert(d: Dict[str, Any], path_label: str, allow_output_config: bool = True) -> None:
             if not isinstance(d, dict):
                 return
             thinking = d.get('thinking')
             if isinstance(thinking, dict) and thinking.get('type') == 'enabled':
                 effort = self._budget_tokens_to_effort(thinking.get('budget_tokens'))
                 d['thinking'] = {'type': 'adaptive'}
-                if effort is not None and 'output_config' not in d:
+                # Only derive output_config where it will actually be forwarded to
+                # the request body. The litellm_params top-level dict is
+                # router-internal metadata that is not reliably forwarded, so we
+                # skip the effort hint there (the adaptive rewrite still applies).
+                if allow_output_config and effort is not None and 'output_config' not in d:
                     d['output_config'] = {'effort': effort}
                     path_label += f" (effort={effort})"
                 modified.append(path_label)
@@ -605,7 +609,7 @@ class AnthropicParamsFilterHook(CustomLogger):
         litellm_params = data.get('litellm_params', {})
         _convert(data, "data")
         _convert(extra_body, "extra_body")
-        _convert(litellm_params, "litellm_params")
+        _convert(litellm_params, "litellm_params", allow_output_config=False)
         if isinstance(litellm_params, dict):
             _convert(litellm_params.get('extra_body', {}), "litellm_params.extra_body")
 

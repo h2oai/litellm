@@ -254,3 +254,36 @@ async def test_max_tokens_not_inflated_after_adaptive_conversion(hook):
     out = await _run(hook, data)
     assert out["max_tokens"] == 1000
     assert out["thinking"] == {"type": "adaptive"}
+
+
+@pytest.mark.parametrize("budget", [None, 0, -1, "abc", {}])
+async def test_degenerate_budget_tokens_no_output_config(hook, budget):
+    # Degenerate budgets must still convert to adaptive but add NO output_config.
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "thinking": {"type": "enabled", "budget_tokens": budget},
+    }
+    out = await _run(hook, data)
+    assert out["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in out
+
+
+async def test_missing_budget_tokens_no_output_config(hook):
+    data = {"model": "claude-sonnet-5", "messages": [], "thinking": {"type": "enabled"}}
+    out = await _run(hook, data)
+    assert out["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in out
+
+
+async def test_effort_lands_in_correct_subdict(hook):
+    # thinking in extra_body -> effort in extra_body, not top-level data.
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "extra_body": {"thinking": {"type": "enabled", "budget_tokens": 20000}},
+    }
+    out = await _run(hook, data)
+    assert out["extra_body"]["thinking"] == {"type": "adaptive"}
+    assert out["extra_body"].get("output_config") == {"effort": "high"}
+    assert "output_config" not in out  # not written to top-level
