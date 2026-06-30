@@ -433,6 +433,10 @@ class AnthropicParamsFilterHook(CustomLogger):
             # Not an Anthropic model, nothing to do
             return
 
+        if self._is_no_sampling_params_model(model):
+            # Newer Claude models reject temperature entirely — never force it.
+            return
+
         if not self._has_thinking_enabled(data):
             # Thinking not enabled, nothing to do
             return
@@ -493,6 +497,124 @@ class AnthropicParamsFilterHook(CustomLogger):
             return False
         s = str(model).lower()
         return any(frag in s for frag in self._STRONGER_EXCLUSIONS_FRAGMENTS)
+
+    # Newer Claude models that reject the sampling params temperature/top_p/top_k
+    # ENTIRELY with HTTP 400 ("`temperature` is deprecated for this model."), and
+    # reject the legacy extended-thinking enabled/budget_tokens API ("use
+    # thinking.type.adaptive and output_config.effort"). They use adaptive
+    # thinking. Handled like OpenAI o1 / gpt-5 reasoning models: all sampling
+    # params are stripped, and thinking is forced to adaptive. Mirrors
+    # src.enums.anthropic_no_sampling_params; duplicated here because the hook
+    # runs in the litellm env and can't import h2ogpt's src tree.
+    _NO_SAMPLING_PARAMS_FRAGMENTS = (
+        "claude-fable-5",
+        "claude-mythos",       # mythos-5 and mythos-preview
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+    )
+
+    def _is_no_sampling_params_model(self, model: str) -> bool:
+        if not model:
+            return False
+        s = str(model).lower()
+        return any(frag in s for frag in self._NO_SAMPLING_PARAMS_FRAGMENTS)
+
+    def _remove_sampling_params_for_anthropic(self, data: Dict[str, Any], model: str) -> None:
+        """Strip temperature/top_p/top_k for newer Claude models that reject them.
+
+        Fable 5 / Mythos, Opus 4.7+, and Sonnet 5 return HTTP 400 if any of
+        temperature, top_p, or top_k is present (each is "deprecated for this
+        model"). Remove all three from every location litellm/the router might
+        place them — the same dicts handled by _remove_top_p_for_anthropic.
+        """
+        if not self._is_anthropic_provider(model):
+            return
+
+        removed = []
+
+        def _strip(d: Dict[str, Any], path_label: str) -> None:
+            if not isinstance(d, dict):
+                return
+            for param in ("temperature", "top_p", "top_k"):
+                if param in d:
+                    removed.append(f"{path_label}.{param}={d[param]}")
+                    del d[param]
+
+        extra_body = data.get('extra_body', {})
+        litellm_params = data.get('litellm_params', {})
+        _strip(data, "data")
+        _strip(extra_body, "extra_body")
+        _strip(litellm_params, "litellm_params")
+        if isinstance(litellm_params, dict):
+            _strip(litellm_params.get('extra_body', {}), "litellm_params.extra_body")
+
+        if removed and (verbose or verbose_full):
+            print(f"🧹 AnthropicParamsFilterHook: Removed deprecated sampling params for Anthropic model ({model}): {removed}", flush=True)
+
+    @staticmethod
+    def _budget_tokens_to_effort(budget_tokens: Any) -> Optional[str]:
+        """Map a legacy thinking budget_tokens value onto an adaptive effort tier.
+
+        The Anthropic guidance for these models is "use thinking.type.adaptive
+        AND output_config.effort", so when we drop budget_tokens we preserve the
+        user's intended reasoning depth by translating it to an effort level
+        rather than silently falling back to the default.
+        """
+        try:
+            budget = int(budget_tokens)
+        except (TypeError, ValueError):
+            return None
+        if budget <= 0:
+            return None
+        if budget >= 16384:
+            return "high"
+        if budget >= 4096:
+            return "medium"
+        return "low"
+
+    def _force_adaptive_thinking_for_no_sampling(self, data: Dict[str, Any], model: str) -> None:
+        """Convert legacy enabled/budget_tokens thinking to adaptive for newer Claude.
+
+        Fable 5 / Mythos, Opus 4.7+, Sonnet 5 reject
+        ``thinking={"type": "enabled", "budget_tokens": N}`` (HTTP 400, "use
+        thinking.type.adaptive and output_config.effort"). Rewrite any such
+        thinking block to ``{"type": "adaptive"}`` so the request is accepted, and
+        translate the dropped ``budget_tokens`` into ``output_config.effort`` (when
+        no output_config is already present in that dict) so reasoning depth is
+        preserved rather than silently reset to the default.
+        """
+        if not self._is_anthropic_provider(model):
+            return
+
+        modified = []
+
+        def _convert(d: Dict[str, Any], path_label: str, allow_output_config: bool = True) -> None:
+            if not isinstance(d, dict):
+                return
+            thinking = d.get('thinking')
+            if isinstance(thinking, dict) and thinking.get('type') == 'enabled':
+                effort = self._budget_tokens_to_effort(thinking.get('budget_tokens'))
+                d['thinking'] = {'type': 'adaptive'}
+                # Only derive output_config where it will actually be forwarded to
+                # the request body. The litellm_params top-level dict is
+                # router-internal metadata that is not reliably forwarded, so we
+                # skip the effort hint there (the adaptive rewrite still applies).
+                if allow_output_config and effort is not None and 'output_config' not in d:
+                    d['output_config'] = {'effort': effort}
+                    path_label += f" (effort={effort})"
+                modified.append(path_label)
+
+        extra_body = data.get('extra_body', {})
+        litellm_params = data.get('litellm_params', {})
+        _convert(data, "data")
+        _convert(extra_body, "extra_body")
+        _convert(litellm_params, "litellm_params", allow_output_config=False)
+        if isinstance(litellm_params, dict):
+            _convert(litellm_params.get('extra_body', {}), "litellm_params.extra_body")
+
+        if modified and (verbose or verbose_full):
+            print(f"🧠 AnthropicParamsFilterHook: Converted thinking to adaptive for Anthropic model ({model}): {modified}", flush=True)
 
     def _remove_top_p_for_anthropic(self, data: Dict[str, Any], model: str) -> None:
         """
@@ -694,14 +816,28 @@ class AnthropicParamsFilterHook(CustomLogger):
             if verbose_full:
                 print(f"🧹 AnthropicParamsFilterHook: async_pre_call_hook called with call_type={call_type}, model={model}", flush=True)
 
-            # Force temperature=1 when thinking is enabled for Anthropic models
-            # This must be done BEFORE filtering Anthropic params to preserve the thinking parameter for Anthropic models
-            self._force_temperature_for_thinking(data, model)
+            if self._is_no_sampling_params_model(model):
+                # Newer Claude (Fable 5 / Mythos, Opus 4.7+, Sonnet 5): temperature,
+                # top_p and top_k are all deprecated (HTTP 400), and the legacy
+                # enabled/budget_tokens thinking API is rejected. Convert thinking
+                # to adaptive and strip all sampling params — never force
+                # temperature=1 (which would itself 400). Handled like OpenAI o1 /
+                # gpt-5 reasoning models.
+                # ORDERING IS LOAD-BEARING: the adaptive conversion must run before
+                # _ensure_max_tokens_for_thinking (below) so the latter sees no
+                # enabled/budget_tokens block and is a no-op (adaptive has no
+                # budget); otherwise a stale enabled block would inflate max_tokens.
+                self._force_adaptive_thinking_for_no_sampling(data, model)
+                self._remove_sampling_params_for_anthropic(data, model)
+            else:
+                # Force temperature=1 when thinking is enabled for Anthropic models
+                # This must be done BEFORE filtering Anthropic params to preserve the thinking parameter for Anthropic models
+                self._force_temperature_for_thinking(data, model)
 
-            # Remove top_p when temperature is also set for Anthropic models
-            # Anthropic API does not allow both to be specified simultaneously
-            # This must be done AFTER _force_temperature_for_thinking which may set temperature
-            self._remove_top_p_for_anthropic(data, model)
+                # Remove top_p when temperature is also set for Anthropic models
+                # Anthropic API does not allow both to be specified simultaneously
+                # This must be done AFTER _force_temperature_for_thinking which may set temperature
+                self._remove_top_p_for_anthropic(data, model)
 
             # Ensure max_tokens > thinking.budget_tokens for Anthropic models
             # This must be done BEFORE filtering Anthropic params to access the thinking budget
