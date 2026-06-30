@@ -122,3 +122,87 @@ async def test_non_anthropic_params_are_untouched(hook):
     assert out["max_tokens"] == 256
     assert out["tools"]
     assert "output_config" not in out
+
+
+# --- Newer Claude reject temperature/top_p/top_k entirely (Sonnet 5 etc.) ---
+#
+# Fable 5 / Mythos, Opus 4.7+, Sonnet 5 return HTTP 400 if any sampling param is
+# present ("`temperature` is deprecated for this model.") and reject the legacy
+# enabled/budget_tokens thinking API. The hook must strip all three params and
+# convert thinking to adaptive — like OpenAI o1 / gpt-5 reasoning models.
+
+NO_SAMPLING_MODELS = [
+    "claude-sonnet-5",
+    "anthropic/claude-sonnet-5",
+    "claude-sonnet-5-latest",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+    "bedrock/anthropic.claude-sonnet-5",
+]
+
+
+@pytest.mark.parametrize("model", NO_SAMPLING_MODELS)
+async def test_all_sampling_params_stripped_top_level(hook, model):
+    data = {
+        "model": model,
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "top_k": 5,
+        "messages": [],
+    }
+    out = await _run(hook, data)
+    assert "temperature" not in out, model
+    assert "top_p" not in out, model
+    assert "top_k" not in out, model
+
+
+async def test_sampling_params_stripped_in_sub_dicts(hook):
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "extra_body": {"temperature": 0.3, "top_k": 10},
+        "litellm_params": {
+            "temperature": 0.7,
+            "extra_body": {"top_p": 0.8},
+        },
+    }
+    out = await _run(hook, data)
+    assert "temperature" not in out["extra_body"]
+    assert "top_k" not in out["extra_body"]
+    assert "temperature" not in out["litellm_params"]
+    assert "top_p" not in out["litellm_params"]["extra_body"]
+
+
+async def test_thinking_enabled_converted_to_adaptive(hook):
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "thinking": {"type": "enabled", "budget_tokens": 4096},
+    }
+    out = await _run(hook, data)
+    assert out["thinking"] == {"type": "adaptive"}
+
+
+async def test_temperature_not_forced_to_one_with_thinking(hook):
+    # The old behavior forces temperature=1 when thinking is enabled; that 400s
+    # on these models, so temperature must be absent, not 1.
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "temperature": 0.2,
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+    }
+    out = await _run(hook, data)
+    assert "temperature" not in out
+    assert out["thinking"] == {"type": "adaptive"}
+
+
+async def test_older_claude_4x_keeps_temperature(hook):
+    # Regression guard: older 4.x must NOT be treated as no-sampling — they
+    # accept temperature (only temperature+top_p together is rejected).
+    for model in ("claude-sonnet-4-6", "claude-opus-4-6"):
+        data = {"model": model, "temperature": 0.5, "messages": []}
+        out = await _run(hook, data)
+        assert out.get("temperature") == 0.5, model
