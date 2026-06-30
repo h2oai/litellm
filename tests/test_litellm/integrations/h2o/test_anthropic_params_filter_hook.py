@@ -206,3 +206,51 @@ async def test_older_claude_4x_keeps_temperature(hook):
         data = {"model": model, "temperature": 0.5, "messages": []}
         out = await _run(hook, data)
         assert out.get("temperature") == 0.5, model
+
+
+# --- adaptive conversion: budget->effort, output_config preserved, max_tokens ---
+
+
+async def test_budget_tokens_mapped_to_effort(hook):
+    # Dropping budget_tokens should preserve reasoning depth via output_config.effort.
+    for budget, expected in [(20000, "high"), (8192, "medium"), (1024, "low")]:
+        data = {
+            "model": "claude-sonnet-5",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": budget},
+        }
+        out = await _run(hook, data)
+        assert out["thinking"] == {"type": "adaptive"}, budget
+        assert out.get("output_config") == {"effort": expected}, (budget, out.get("output_config"))
+
+
+async def test_existing_output_config_not_overwritten(hook):
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "thinking": {"type": "enabled", "budget_tokens": 20000},
+        "output_config": {"effort": "low"},
+    }
+    out = await _run(hook, data)
+    assert out["output_config"] == {"effort": "low"}  # user's choice preserved
+
+
+async def test_output_config_preserved_for_no_sampling_model(hook):
+    # output_config (adaptive effort) must NOT be stripped for Anthropic models.
+    data = {"model": "claude-sonnet-5", "output_config": {"effort": "high"}, "messages": []}
+    out = await _run(hook, data)
+    assert out.get("output_config") == {"effort": "high"}
+
+
+async def test_max_tokens_not_inflated_after_adaptive_conversion(hook):
+    # Load-bearing ordering: _ensure_max_tokens_for_thinking must be a no-op once
+    # thinking is adaptive (no budget_tokens), so max_tokens stays as the caller set it.
+    data = {
+        "model": "claude-sonnet-5",
+        "messages": [],
+        "max_tokens": 1000,
+        "thinking": {"type": "enabled", "budget_tokens": 4096},
+    }
+    out = await _run(hook, data)
+    assert out["max_tokens"] == 1000
+    assert out["thinking"] == {"type": "adaptive"}

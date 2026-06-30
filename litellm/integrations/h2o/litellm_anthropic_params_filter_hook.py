@@ -552,13 +552,37 @@ class AnthropicParamsFilterHook(CustomLogger):
         if removed and (verbose or verbose_full):
             print(f"🧹 AnthropicParamsFilterHook: Removed deprecated sampling params for Anthropic model ({model}): {removed}", flush=True)
 
+    @staticmethod
+    def _budget_tokens_to_effort(budget_tokens: Any) -> Optional[str]:
+        """Map a legacy thinking budget_tokens value onto an adaptive effort tier.
+
+        The Anthropic guidance for these models is "use thinking.type.adaptive
+        AND output_config.effort", so when we drop budget_tokens we preserve the
+        user's intended reasoning depth by translating it to an effort level
+        rather than silently falling back to the default.
+        """
+        try:
+            budget = int(budget_tokens)
+        except (TypeError, ValueError):
+            return None
+        if budget <= 0:
+            return None
+        if budget >= 16384:
+            return "high"
+        if budget >= 4096:
+            return "medium"
+        return "low"
+
     def _force_adaptive_thinking_for_no_sampling(self, data: Dict[str, Any], model: str) -> None:
         """Convert legacy enabled/budget_tokens thinking to adaptive for newer Claude.
 
         Fable 5 / Mythos, Opus 4.7+, Sonnet 5 reject
         ``thinking={"type": "enabled", "budget_tokens": N}`` (HTTP 400, "use
         thinking.type.adaptive and output_config.effort"). Rewrite any such
-        thinking block to ``{"type": "adaptive"}`` so the request is accepted.
+        thinking block to ``{"type": "adaptive"}`` so the request is accepted, and
+        translate the dropped ``budget_tokens`` into ``output_config.effort`` (when
+        no output_config is already present in that dict) so reasoning depth is
+        preserved rather than silently reset to the default.
         """
         if not self._is_anthropic_provider(model):
             return
@@ -570,7 +594,11 @@ class AnthropicParamsFilterHook(CustomLogger):
                 return
             thinking = d.get('thinking')
             if isinstance(thinking, dict) and thinking.get('type') == 'enabled':
+                effort = self._budget_tokens_to_effort(thinking.get('budget_tokens'))
                 d['thinking'] = {'type': 'adaptive'}
+                if effort is not None and 'output_config' not in d:
+                    d['output_config'] = {'effort': effort}
+                    path_label += f" (effort={effort})"
                 modified.append(path_label)
 
         extra_body = data.get('extra_body', {})
@@ -791,6 +819,10 @@ class AnthropicParamsFilterHook(CustomLogger):
                 # to adaptive and strip all sampling params — never force
                 # temperature=1 (which would itself 400). Handled like OpenAI o1 /
                 # gpt-5 reasoning models.
+                # ORDERING IS LOAD-BEARING: the adaptive conversion must run before
+                # _ensure_max_tokens_for_thinking (below) so the latter sees no
+                # enabled/budget_tokens block and is a no-op (adaptive has no
+                # budget); otherwise a stale enabled block would inflate max_tokens.
                 self._force_adaptive_thinking_for_no_sampling(data, model)
                 self._remove_sampling_params_for_anthropic(data, model)
             else:
