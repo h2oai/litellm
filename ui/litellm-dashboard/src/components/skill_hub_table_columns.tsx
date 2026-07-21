@@ -3,6 +3,7 @@ import { Badge, Text } from "@tremor/react";
 import { Tooltip } from "antd";
 import { CopyOutlined, LinkOutlined } from "@ant-design/icons";
 import { Plugin } from "./claude_code_plugins/types";
+import { StatusBadge } from "@/components/shared/table_cells";
 
 export const skillHubColumns = (
   showModal: (skill: Plugin) => void,
@@ -34,9 +35,7 @@ export const skillHubColumns = (
             </Tooltip>
           </div>
           {skill.description && (
-            <Text className="text-xs text-gray-500 line-clamp-1 md:hidden">
-              {skill.description}
-            </Text>
+            <Text className="text-xs text-gray-500 line-clamp-1 md:hidden">{skill.description}</Text>
           )}
         </div>
       );
@@ -46,9 +45,7 @@ export const skillHubColumns = (
     header: "Description",
     accessorKey: "description",
     enableSorting: false,
-    cell: ({ row }) => (
-      <Text className="text-xs line-clamp-2">{row.original.description || "-"}</Text>
-    ),
+    cell: ({ row }) => <Text className="text-xs line-clamp-2">{row.original.description || "-"}</Text>,
   },
   {
     header: "Category",
@@ -57,16 +54,18 @@ export const skillHubColumns = (
     cell: ({ row }) => {
       const cat = row.original.category;
       if (!cat) return <Text className="text-xs text-gray-400">-</Text>;
-      return <Badge color="blue" size="xs">{cat}</Badge>;
+      return (
+        <Badge color="blue" size="xs">
+          {cat}
+        </Badge>
+      );
     },
   },
   {
     header: "Domain",
     accessorKey: "domain",
     enableSorting: true,
-    cell: ({ row }) => (
-      <Text className="text-xs">{row.original.domain || "-"}</Text>
-    ),
+    cell: ({ row }) => <Text className="text-xs">{row.original.domain || "-"}</Text>,
   },
   {
     header: "Source",
@@ -106,9 +105,10 @@ export const skillHubColumns = (
     accessorKey: "enabled",
     enableSorting: true,
     cell: ({ row }) => (
-      <Badge color={row.original.enabled ? "green" : "gray"} size="xs">
-        {row.original.enabled ? "Public" : "Draft"}
-      </Badge>
+      <StatusBadge
+        tone={row.original.enabled ? "success" : "neutral"}
+        label={row.original.enabled ? "Public" : "Draft"}
+      />
     ),
   },
 ];
