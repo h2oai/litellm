@@ -12975,6 +12975,49 @@ async def model_settings():
     return returned_list
 
 
+@router.get(
+    "/v1/router/models",
+    description="Returns the raw model list from the LiteLLM router without wildcard expansion",
+    tags=["model management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def router_model_list(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Returns the raw model names configured in the LiteLLM router.
+
+    This endpoint bypasses wildcard expansion and access control logic to return
+    the actual model names configured in the router, making it useful for
+    model discovery without expensive health checks or wildcard processing.
+
+    Returns:
+        Dictionary with 'data' array containing model objects with 'id' field
+    """
+    global llm_router
+
+    if llm_router is None:
+        # No router configured, return empty list
+        model_names = []
+    else:
+        # Get raw model names from router
+        model_names = llm_router.get_model_names()
+
+    return {
+        "data": [
+            {
+                "id": model_name,
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "litellm",
+                "permission": [],
+            }
+            for model_name in model_names
+        ],
+        "object": "list",
+    }
+
+
 #### ALERTING MANAGEMENT ENDPOINTS ####
 
 
