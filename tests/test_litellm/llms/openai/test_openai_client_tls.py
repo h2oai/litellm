@@ -15,6 +15,7 @@ Three things are verified:
 """
 
 import datetime
+import io
 import json
 import os
 import ssl
@@ -172,8 +173,10 @@ class _ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("content-length", 0) or 0)
         self.rfile.read(length)
-        body = json.dumps(
-            {
+        if self.path.endswith("/audio/transcriptions"):
+            response = {"text": "mtls-transcription-ok"}
+        else:
+            response = {
                 "id": "chatcmpl-mtls",
                 "object": "chat.completion",
                 "created": 0,
@@ -185,9 +188,13 @@ class _ChatHandler(BaseHTTPRequestHandler):
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
             }
-        ).encode()
+        body = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -285,6 +292,24 @@ async def test_completion_succeeds_with_tls_references(mtls_llm_endpoint):
             client_key="os.environ/GW_CLIENT_KEY",
         )
     assert response.choices[0].message.content == "mtls-ok"
+
+
+@pytest.mark.asyncio
+async def test_transcription_succeeds_with_per_deployment_client_cert(
+    mtls_llm_endpoint,
+):
+    audio = io.BytesIO(b"fake wav")
+    audio.name = "sample.wav"
+    response = await litellm.atranscription(
+        model="openai/whisper-1",
+        file=audio,
+        api_base=mtls_llm_endpoint["api_base"],
+        api_key="unused",
+        ssl_verify=mtls_llm_endpoint["ca"],
+        client_cert=mtls_llm_endpoint["client_cert"],
+        client_key=mtls_llm_endpoint["client_key"],
+    )
+    assert response.text == "mtls-transcription-ok"
 
 
 @pytest.mark.asyncio
