@@ -19,6 +19,7 @@ from typing import (
     Union,
 )
 
+import certifi
 import httpx
 import openai
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
@@ -33,6 +34,47 @@ from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
     get_ssl_configuration,
 )
+
+
+def _resolve_ssl_config(
+    ssl_verify: Optional[Union[bool, str, ssl.SSLContext]] = None,
+    client_cert: Optional[Union[str, Tuple[str, str]]] = None,
+) -> Union[bool, str, ssl.SSLContext]:
+    """Resolve the TLS configuration for an OpenAI-provider httpx client.
+
+    With no client certificate this is exactly `get_ssl_configuration(ssl_verify)`,
+    so behaviour is unchanged for every deployment that configures none.
+
+    With a client certificate we must build a PRIVATE ssl.SSLContext rather than
+    load the chain into the one `get_ssl_configuration` returns: those contexts
+    are CACHED and shared across deployments (keyed only by CA file + security
+    level + curve), so calling load_cert_chain() on a shared context would
+    present that deployment's mTLS identity on every other model resolving to the
+    same cache key. That is a cross-model credential leak, not a perf detail.
+    """
+    if not client_cert:
+        return get_ssl_configuration(ssl_verify)
+
+    if ssl_verify is False:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    elif isinstance(ssl_verify, ssl.SSLContext):
+        # Caller-supplied context: they own it, including its cert chain.
+        context = ssl_verify
+    else:
+        cafile: Optional[str] = None
+        if isinstance(ssl_verify, str) and os.path.exists(ssl_verify):
+            cafile = ssl_verify
+        elif os.getenv("SSL_CERT_FILE") and os.path.exists(os.environ["SSL_CERT_FILE"]):
+            cafile = os.environ["SSL_CERT_FILE"]
+        context = ssl.create_default_context(cafile=cafile or certifi.where())
+
+    if isinstance(client_cert, (tuple, list)):
+        context.load_cert_chain(*client_cert)
+    else:
+        context.load_cert_chain(client_cert)
+    return context
 
 
 def _get_client_init_params(cls: type) -> Tuple[str, ...]:
@@ -156,6 +198,36 @@ class BaseOpenAILLM:
         )
 
     @staticmethod
+    def tls_client_kwargs(litellm_params: Optional[dict]) -> Dict[str, Any]:
+        """Per-deployment TLS transport config, ready to splat into _get_openai_client.
+
+        Reads three optional litellm_params:
+
+            ssl_verify  -- bool | path to a CA bundle | ssl.SSLContext
+            client_cert -- path to a client certificate (or a combined PEM)
+            client_key  -- path to the client private key, when not in client_cert
+
+        Returns both keys unconditionally with None values when unset, so a
+        deployment that configures none of them produces the same client as
+        before this existed.
+        """
+        if not litellm_params:
+            return {"ssl_verify": None, "client_cert": None}
+
+        client_cert = litellm_params.get("client_cert")
+        client_key = litellm_params.get("client_key")
+        cert: Optional[Union[str, Tuple[str, str]]]
+        if client_cert and client_key:
+            cert = (client_cert, client_key)
+        elif client_cert:
+            # A lone cert is valid: a combined PEM carrying the private key.
+            cert = client_cert
+        else:
+            cert = None
+
+        return {"ssl_verify": litellm_params.get("ssl_verify"), "client_cert": cert}
+
+    @staticmethod
     def get_openai_client_cache_key(client_initialization_params: dict, client_type: Literal["openai", "azure"]) -> str:
         """Creates a cache key for the OpenAI client based on the client initialization parameters"""
         hashed_api_key = None
@@ -175,6 +247,13 @@ class BaseOpenAILLM:
             "max_retries",
             "organization",
             "api_base",
+            # TLS transport config MUST take part in the cache key: two deployments
+            # differing only by client certificate (or CA bundle) must not share a
+            # cached client, or one model's mTLS identity would be presented for
+            # another's requests. These are not OpenAI SDK __init__ params, so
+            # _OPENAI_INIT_PARAMS (derived from that signature) does not cover them.
+            "ssl_verify",
+            "client_cert",
         )
         openai_client_fields = (
             BaseOpenAILLM.get_openai_client_initialization_param_fields(client_type=client_type)
@@ -200,7 +279,29 @@ class BaseOpenAILLM:
     @staticmethod
     def _get_async_http_client(
         shared_session: Optional["ClientSession"] = None,
+        ssl_verify: Optional[Union[bool, str, ssl.SSLContext]] = None,
+        client_cert: Optional[Union[str, Tuple[str, str]]] = None,
     ) -> Optional[httpx.AsyncClient]:
+        """Build the httpx client for OpenAI-provider routes.
+
+        `ssl_verify` and `client_cert` come from the deployment's litellm_params
+        (see openai.py). Both default to None, in which case this behaves exactly
+        as before: get_ssl_configuration(None) IS the previous no-argument call,
+        and httpx treats cert=None as "no client certificate" -- so a deployment
+        that configures neither gets a byte-identical client.
+
+        litellm already accepted a per-model `ssl_verify` litellm_param, but this
+        call site dropped it (it called get_ssl_configuration() with no arguments),
+        so a private CA on an openai/-prefixed endpoint was silently ignored.
+        Threading it through fixes that; `client_cert` adds the mutual-TLS leg,
+        which this path never supported at all.
+
+        Deliberately NOT wired here: the global SSL_CERTIFICATE / litellm.ssl_certificate
+        fallback that the sibling HTTPHandler.create_client honours. Reading it
+        would change behaviour for existing deployments that set it globally --
+        they would start presenting a client certificate on openai routes without
+        asking. Client certificates here are opt-in per deployment only.
+        """
         if litellm.aclient_session is not None:
             return litellm.aclient_session
 
@@ -209,8 +310,11 @@ class BaseOpenAILLM:
 
             return httpx.AsyncClient(transport=MockOpenAITransport())
 
-        # Get unified SSL configuration
-        ssl_config = get_ssl_configuration()
+        # Get unified SSL configuration. NOTE: when an explicit `transport` is
+        # passed, httpx IGNORES the client-level verify=/cert= arguments -- the
+        # transport performs the handshake -- so the client certificate has to be
+        # carried by the ssl_context handed to the transport below, not by cert=.
+        ssl_config = _resolve_ssl_config(ssl_verify, client_cert)
 
         return httpx.AsyncClient(
             verify=ssl_config,
@@ -223,7 +327,11 @@ class BaseOpenAILLM:
         )
 
     @staticmethod
-    def _get_sync_http_client() -> Optional[httpx.Client]:
+    def _get_sync_http_client(
+        ssl_verify: Optional[Union[bool, str, ssl.SSLContext]] = None,
+        client_cert: Optional[Union[str, Tuple[str, str]]] = None,
+    ) -> Optional[httpx.Client]:
+        """Sync counterpart of _get_async_http_client -- same defaults, same guarantees."""
         if litellm.client_session is not None:
             return litellm.client_session
 
@@ -232,8 +340,9 @@ class BaseOpenAILLM:
 
             return httpx.Client(transport=MockOpenAITransport())
 
-        # Get unified SSL configuration
-        ssl_config = get_ssl_configuration()
+        # Get unified SSL configuration (carries the client certificate when one
+        # is configured -- see _resolve_ssl_config).
+        ssl_config = _resolve_ssl_config(ssl_verify, client_cert)
 
         return httpx.Client(
             verify=ssl_config,
