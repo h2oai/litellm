@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.abspath("../../.."))
 
 from litellm.integrations.h2o.litellm_oauth_auth_hook import OAuthAuthHook  # noqa: E402
+from litellm.proxy_auth.async_oauth2 import AsyncOAuth2ClientCredential  # noqa: E402
 from litellm.proxy_auth.credentials import AccessToken  # noqa: E402
 
 OAUTH_BLOCK = {
@@ -133,10 +134,7 @@ async def test_malformed_model_info_is_untouched():
 async def test_configured_model_gets_bearer_header():
     hook = OAuthAuthHook()
     with _patch_router(_router([_deployment("gw-model", oauth=OAUTH_BLOCK)])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token(),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
             out = await _run(hook, {"model": "gw-model", "messages": []})
     assert out["extra_headers"]["Authorization"] == "Bearer minted-token"
 
@@ -146,10 +144,7 @@ async def test_custom_header_name_and_scheme():
     hook = OAuthAuthHook()
     oauth = {**OAUTH_BLOCK, "header_name": "X-Gateway-Token", "header_scheme": ""}
     with _patch_router(_router([_deployment("gw-model", oauth=oauth)])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token("raw-token"),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token("raw-token")):
             out = await _run(hook, {"model": "gw-model"})
     assert out["extra_headers"]["X-Gateway-Token"] == "raw-token"
     assert "Authorization" not in out["extra_headers"]
@@ -166,10 +161,7 @@ async def test_static_deployment_headers_are_preserved():
         litellm_params={"extra_headers": {"x-gateway-route": "route-123"}},
     )
     with _patch_router(_router([deployment])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token(),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
             out = await _run(hook, {"model": "gw-model"})
     assert out["extra_headers"]["x-gateway-route"] == "route-123"
     assert out["extra_headers"]["Authorization"] == "Bearer minted-token"
@@ -183,10 +175,7 @@ async def test_request_headers_are_preserved_but_auth_wins():
     )
     data = {"model": "gw-model", "extra_headers": {"b": "from-request", "Authorization": "Bearer stale"}}
     with _patch_router(_router([deployment])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token(),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
             out = await _run(hook, data)
     assert out["extra_headers"]["a"] == "from-deployment"
     assert out["extra_headers"]["b"] == "from-request"
@@ -200,10 +189,7 @@ async def test_api_key_is_never_modified():
     hook = OAuthAuthHook()
     data = {"model": "gw-model"}
     with _patch_router(_router([_deployment("gw-model", oauth=OAUTH_BLOCK)])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token(),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
             out = await _run(hook, data)
     assert "api_key" not in out
     assert "api_base" not in out
@@ -214,10 +200,7 @@ async def test_api_key_is_never_modified():
 async def test_credential_is_reused_across_requests():
     hook = OAuthAuthHook()
     with _patch_router(_router([_deployment("gw-model", oauth=OAUTH_BLOCK)])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
-            return_value=_fake_token(),
-        ):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
             await _run(hook, {"model": "gw-model"})
             await _run(hook, {"model": "gw-model"})
     assert len(hook.registry) == 1
@@ -256,8 +239,9 @@ async def test_token_failure_fails_closed_and_does_not_leak_secrets():
 
     hook = OAuthAuthHook()
     with _patch_router(_router([_deployment("gw-model", oauth=OAUTH_BLOCK)])):
-        with patch(
-            "litellm.proxy_auth.async_oauth2.AsyncOAuth2ClientCredential.get_token",
+        with patch.object(
+            AsyncOAuth2ClientCredential,
+            "get_token",
             side_effect=OAuth2TokenError("token endpoint returned 401: invalid_client"),
         ):
             with pytest.raises(Exception) as exc:

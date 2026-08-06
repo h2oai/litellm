@@ -1216,6 +1216,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         client: Optional[AsyncOpenAI] = None,
         max_retries=None,
         shared_session: Optional["ClientSession"] = None,
+        litellm_params: Optional[dict] = None,
     ):
         try:
             openai_aclient: AsyncOpenAI = self._get_openai_client(  # type: ignore
@@ -1226,6 +1227,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 client=client,
                 shared_session=shared_session,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
             headers, response = await self.make_openai_embedding_request(
                 openai_aclient=openai_aclient,
@@ -1288,6 +1290,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         aembedding=None,
         max_retries: Optional[int] = None,
         shared_session: Optional["ClientSession"] = None,
+        litellm_params: Optional[dict] = None,
     ) -> EmbeddingResponse:
         super().embedding()
         try:
@@ -1314,6 +1317,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     client=client,
                     max_retries=max_retries,
                     shared_session=shared_session,
+                    litellm_params=litellm_params,
                 )
 
             openai_client: OpenAI = self._get_openai_client(  # type: ignore
@@ -1323,6 +1327,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 timeout=timeout,
                 max_retries=max_retries,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             ## embedding CALL
@@ -1373,6 +1378,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         max_retries=None,
         organization: Optional[str] = None,
         headers: Optional[dict] = None,
+        litellm_params: Optional[dict] = None,
     ):
         response = None
         try:
@@ -1384,6 +1390,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 organization=organization,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             if headers:
@@ -1425,6 +1432,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         aimg_generation=None,
         organization: Optional[str] = None,
         headers: Optional[dict] = None,
+        litellm_params: Optional[dict] = None,
     ) -> ImageResponse:
         data = {}
         try:
@@ -1446,6 +1454,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     max_retries=max_retries,
                     organization=organization,
                     headers=headers,
+                    litellm_params=litellm_params,
                 )  # type: ignore
 
             openai_client: OpenAI = self._get_openai_client(  # type: ignore
@@ -1456,6 +1465,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 organization=organization,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             ## LOGGING

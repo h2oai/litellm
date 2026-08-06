@@ -34,6 +34,7 @@ from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
     get_ssl_configuration,
 )
+from litellm.proxy_auth.async_oauth2 import resolve_secret_ref_to_file
 
 
 def _resolve_ssl_config(
@@ -63,17 +64,21 @@ def _resolve_ssl_config(
         # Caller-supplied context: they own it, including its cert chain.
         context = ssl_verify
     else:
-        cafile: Optional[str] = None
-        if isinstance(ssl_verify, str) and os.path.exists(ssl_verify):
-            cafile = ssl_verify
+        ca_ref: Optional[str] = None
+        if isinstance(ssl_verify, str):
+            ca_ref = ssl_verify
         elif os.getenv("SSL_CERT_FILE") and os.path.exists(os.environ["SSL_CERT_FILE"]):
-            cafile = os.environ["SSL_CERT_FILE"]
-        context = ssl.create_default_context(cafile=cafile or certifi.where())
+            ca_ref = os.environ["SSL_CERT_FILE"]
+        with resolve_secret_ref_to_file(ca_ref or certifi.where(), field_name="ssl_verify") as ca_path:
+            context = ssl.create_default_context(cafile=ca_path)
 
     if isinstance(client_cert, (tuple, list)):
-        context.load_cert_chain(*client_cert)
+        with resolve_secret_ref_to_file(client_cert[0], field_name="client_cert") as cert_path:
+            with resolve_secret_ref_to_file(client_cert[1], field_name="client_key") as key_path:
+                context.load_cert_chain(cert_path, key_path)
     else:
-        context.load_cert_chain(client_cert)
+        with resolve_secret_ref_to_file(client_cert, field_name="client_cert") as cert_path:
+            context.load_cert_chain(cert_path)
     return context
 
 

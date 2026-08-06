@@ -266,6 +266,28 @@ async def test_completion_succeeds_with_per_deployment_client_cert(mtls_llm_endp
 
 
 @pytest.mark.asyncio
+async def test_completion_succeeds_with_tls_references(mtls_llm_endpoint):
+    env = {
+        "GW_CA_BUNDLE": mtls_llm_endpoint["ca"],
+        "GW_CLIENT_CERT": mtls_llm_endpoint["client_cert"],
+        "GW_CLIENT_KEY": mtls_llm_endpoint["client_key"],
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        for key, value in env.items():
+            mp.setenv(key, value)
+        response = await litellm.acompletion(
+            model="openai/gw-model",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base=mtls_llm_endpoint["api_base"],
+            api_key="unused",
+            ssl_verify="os.environ/GW_CA_BUNDLE",
+            client_cert="os.environ/GW_CLIENT_CERT",
+            client_key="os.environ/GW_CLIENT_KEY",
+        )
+    assert response.choices[0].message.content == "mtls-ok"
+
+
+@pytest.mark.asyncio
 async def test_completion_fails_without_client_cert(mtls_llm_endpoint):
     """Proves the endpoint really requires a client certificate, so the positive
     test above is meaningful rather than passing for some unrelated reason.

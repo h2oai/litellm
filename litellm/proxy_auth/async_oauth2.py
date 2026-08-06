@@ -44,9 +44,12 @@ import hashlib
 import json
 import os
 import ssl
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 import certifi
@@ -146,6 +149,38 @@ def resolve_secret_ref(value: Optional[str], *, field_name: str) -> str:
         return contents
 
     return raw
+
+
+@contextmanager
+def resolve_secret_ref_to_file(value: Optional[str], *, field_name: str):
+    """Resolve a secret reference to a filesystem path usable by ssl APIs.
+
+    `ssl.SSLContext.load_cert_chain()` only accepts paths, while operators may
+    point at either mounted files or env vars containing PEM text. The temporary
+    file exists only long enough for OpenSSL to load it into the context.
+    """
+    resolved = resolve_secret_ref(value, field_name=field_name)
+    if os.path.exists(resolved):
+        yield resolved
+        return
+
+    if not resolved.startswith("-----BEGIN "):
+        # Let the ssl API raise the same path-oriented error it would have raised
+        # before. The caller wraps it without echoing this value.
+        yield resolved
+        return
+
+    tmp = tempfile.NamedTemporaryFile("w", delete=False)
+    try:
+        tmp.write(resolved)
+        tmp.flush()
+        tmp.close()
+        yield tmp.name
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _require_str(raw: Dict[str, Any], key: str) -> str:
@@ -445,22 +480,25 @@ class AsyncOAuth2ClientCredential:
         else:
             cafile = self.config.ca_bundle or certifi.where()
             try:
-                context = ssl.create_default_context(cafile=cafile)
+                with resolve_secret_ref_to_file(cafile, field_name="ca_bundle") as ca_path:
+                    context = ssl.create_default_context(cafile=ca_path)
             except OSError as e:
                 raise OAuth2ConfigError(
-                    f"h2o_oauth.ca_bundle '{cafile}' could not be loaded: {e.strerror}"
+                    f"h2o_oauth.ca_bundle could not be loaded: {e.strerror}"
                 ) from None
 
         if self.config.mtls_cert:
             try:
-                if self.config.mtls_key:
-                    context.load_cert_chain(self.config.mtls_cert, self.config.mtls_key)
-                else:
-                    context.load_cert_chain(self.config.mtls_cert)
+                with resolve_secret_ref_to_file(self.config.mtls_cert, field_name="mtls_cert") as cert_path:
+                    if self.config.mtls_key:
+                        with resolve_secret_ref_to_file(self.config.mtls_key, field_name="mtls_key") as key_path:
+                            context.load_cert_chain(cert_path, key_path)
+                    else:
+                        context.load_cert_chain(cert_path)
             except (OSError, ssl.SSLError) as e:
                 raise OAuth2ConfigError(
-                    f"h2o_oauth.mtls_cert '{self.config.mtls_cert}' could not be loaded "
-                    f"({type(e).__name__}) -- check the path, the PEM contents, and that "
+                    f"h2o_oauth.mtls_cert could not be loaded ({type(e).__name__}) -- check the path, "
+                    f"the PEM contents, and that "
                     f"mtls_key matches the certificate"
                 ) from None
 
@@ -478,7 +516,7 @@ class AsyncOAuth2ClientCredential:
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.post(self.config.token_url, data=data, auth=basic_auth)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, ssl.SSLError) as e:
             raise OAuth2TokenError(
                 f"token request to {self.config.token_url} failed: {type(e).__name__}: {e}"
             ) from None

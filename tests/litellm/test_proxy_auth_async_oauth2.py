@@ -25,6 +25,7 @@ from litellm.proxy_auth.async_oauth2 import (  # noqa: E402
     OAuth2Config,
     OAuth2ConfigError,
     OAuth2TokenError,
+    resolve_secret_ref_to_file,
     resolve_secret_ref,
 )
 
@@ -451,6 +452,34 @@ def test_no_tls_config_leaves_httpx_defaults_untouched():
     default context (and litellm's SSL_CERT_FILE handling) applies unchanged."""
     cred = AsyncOAuth2ClientCredential(OAuth2Config.from_dict(BASE_CONFIG))
     assert cred._build_ssl_context() is None
+
+
+def test_tls_file_reference_resolves_to_path(tmp_path):
+    cert_file = tmp_path / "client.crt"
+    cert_file.write_text("-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n")
+    with resolve_secret_ref_to_file(f"file://{cert_file}", field_name="mtls_cert") as path:
+        assert path != f"file://{cert_file}"
+        assert os.path.exists(path)
+        with open(path) as f:
+            assert f.read() == cert_file.read_text()
+
+
+def test_tls_env_reference_can_point_at_mounted_file(tmp_path):
+    cert_file = tmp_path / "client.crt"
+    cert_file.write_text("cert")
+    with patch.dict(os.environ, {"CLIENT_CERT_PATH": str(cert_file)}):
+        with resolve_secret_ref_to_file("os.environ/CLIENT_CERT_PATH", field_name="mtls_cert") as path:
+            assert path == str(cert_file)
+
+
+def test_tls_env_reference_can_contain_pem_material():
+    pem = "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n"
+    with patch.dict(os.environ, {"CLIENT_CERT_PEM": pem}):
+        with resolve_secret_ref_to_file("os.environ/CLIENT_CERT_PEM", field_name="mtls_cert") as path:
+            assert os.path.exists(path)
+            with open(path) as f:
+                assert f.read() == pem
+        assert not os.path.exists(path)
 
 
 # --------------------------------------------------------------------------
