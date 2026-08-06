@@ -20,6 +20,14 @@ from .credentials import (
     GenericOAuth2Credential,
     ProxyAuthHandler,
 )
+from .async_oauth2 import (
+    AsyncOAuth2ClientCredential,
+    CredentialRegistry,
+    OAuth2Config,
+    OAuth2ConfigError,
+    OAuth2TokenError,
+    resolve_secret_ref,
+)
 
 __all__ = [
     "AccessToken",
@@ -27,4 +35,14 @@ __all__ = [
     "AzureADCredential",
     "GenericOAuth2Credential",
     "ProxyAuthHandler",
+    # Async, per-deployment client-credentials support (private_key_jwt + mTLS).
+    # Unlike ProxyAuthHandler these are NOT wired to the litellm.proxy_auth
+    # global -- the caller owns the credential and decides which request it
+    # applies to.
+    "AsyncOAuth2ClientCredential",
+    "CredentialRegistry",
+    "OAuth2Config",
+    "OAuth2ConfigError",
+    "OAuth2TokenError",
+    "resolve_secret_ref",
 ]

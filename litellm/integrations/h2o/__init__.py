@@ -13,6 +13,7 @@ registration via the LiteLLM proxy config ``callbacks`` list, e.g.::
       - litellm.integrations.h2o.litellm_dedup_tool_call_ids_hook.dedup_tool_call_ids_hook
       - litellm.integrations.h2o.litellm_web_search_hook.web_search_hook
       - litellm.integrations.h2o.litellm_router_hook.router_hook
+      - litellm.integrations.h2o.litellm_oauth_auth_hook.oauth_auth_hook
 
 See individual modules for hook documentation.
 """
