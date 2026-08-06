@@ -44,23 +44,24 @@ import hashlib
 import json
 import os
 import ssl
-import tempfile
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 import certifi
 import httpx
 
+from litellm.litellm_core_utils.credential_ref import (
+    CredentialRefError,
+    credential_ref_to_file,
+    resolve_credential_ref,
+)
+
 from litellm._logging import verbose_logger
 
 from .credentials import AccessToken
-
-_ENV_PREFIX = "os.environ/"
-_FILE_PREFIX = "file://"
 
 DEFAULT_REFRESH_BUFFER_SEC = 30
 DEFAULT_TIMEOUT_SEC = 30.0
@@ -108,79 +109,32 @@ class OAuth2TokenError(RuntimeError):
 
 
 def resolve_secret_ref(value: Optional[str], *, field_name: str) -> str:
-    """Resolve a secret indirection to its value.
+    """Resolve a secret indirection to its value, as an `h2o_oauth` field.
 
-    Never includes the resolved value (or any part of it) in raised messages.
+    Thin wrapper over the provider-neutral resolver: it only adds the
+    `h2o_oauth.` prefix to the field name and translates the error type, so
+    callers keep getting OAuth2ConfigError with a message that names the config
+    key they wrote. Never includes the resolved value in raised messages.
     """
-    if value is None or not str(value).strip():
-        raise OAuth2ConfigError(f"h2o_oauth.{field_name} is required but empty")
-
-    raw = str(value).strip()
-
-    if raw.startswith(_ENV_PREFIX):
-        env_name = raw[len(_ENV_PREFIX) :].strip()
-        if not env_name:
-            raise OAuth2ConfigError(f"h2o_oauth.{field_name}: '{_ENV_PREFIX}' given with no variable name")
-        resolved = os.environ.get(env_name)
-        if resolved is None or not resolved.strip():
-            raise OAuth2ConfigError(
-                f"h2o_oauth.{field_name} references environment variable "
-                f"'{env_name}', which is unset or empty in this process"
-            )
-        return resolved
-
-    if raw.startswith(_FILE_PREFIX):
-        path = raw[len(_FILE_PREFIX) :]
-        if not path.startswith("/"):
-            raise OAuth2ConfigError(
-                f"h2o_oauth.{field_name}: file reference must be absolute, "
-                f"e.g. 'file:///etc/secrets/{field_name}'"
-            )
-        try:
-            with open(path, "r") as f:
-                contents = f.read()
-        except OSError as e:
-            # strerror/filename only -- never file contents
-            raise OAuth2ConfigError(
-                f"h2o_oauth.{field_name} references file '{path}' which could not be read: {e.strerror}"
-            ) from None
-        if not contents.strip():
-            raise OAuth2ConfigError(f"h2o_oauth.{field_name} references file '{path}', which is empty")
-        return contents
-
-    return raw
+    try:
+        return resolve_credential_ref(value, field_name=f"h2o_oauth.{field_name}")
+    except CredentialRefError as e:
+        raise OAuth2ConfigError(str(e)) from None
 
 
 @contextmanager
 def resolve_secret_ref_to_file(value: Optional[str], *, field_name: str):
-    """Resolve a secret reference to a filesystem path usable by ssl APIs.
+    """Resolve a secret reference to a filesystem path usable by the ssl APIs.
 
-    `ssl.SSLContext.load_cert_chain()` only accepts paths, while operators may
-    point at either mounted files or env vars containing PEM text. The temporary
-    file exists only long enough for OpenSSL to load it into the context.
+    See litellm_core_utils.credential_ref.credential_ref_to_file: a mounted path
+    is used as-is, PEM text is materialised into a mode-0600 file (memory-backed
+    when available) for as long as OpenSSL needs to read it.
     """
-    resolved = resolve_secret_ref(value, field_name=field_name)
-    if os.path.exists(resolved):
-        yield resolved
-        return
-
-    if not resolved.startswith("-----BEGIN "):
-        # Let the ssl API raise the same path-oriented error it would have raised
-        # before. The caller wraps it without echoing this value.
-        yield resolved
-        return
-
-    tmp = tempfile.NamedTemporaryFile("w", delete=False)
     try:
-        tmp.write(resolved)
-        tmp.flush()
-        tmp.close()
-        yield tmp.name
-    finally:
-        try:
-            Path(tmp.name).unlink(missing_ok=True)
-        except OSError:
-            pass
+        with credential_ref_to_file(value, field_name=f"h2o_oauth.{field_name}") as path:
+            yield path
+    except CredentialRefError as e:
+        raise OAuth2ConfigError(str(e)) from None
 
 
 def _require_str(raw: Dict[str, Any], key: str) -> str:

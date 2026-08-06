@@ -27,6 +27,7 @@ from .async_oauth2 import (
     OAuth2ConfigError,
     OAuth2TokenError,
     resolve_secret_ref,
+    resolve_secret_ref_to_file,
 )
 
 __all__ = [
@@ -45,4 +46,5 @@ __all__ = [
     "OAuth2ConfigError",
     "OAuth2TokenError",
     "resolve_secret_ref",
+    "resolve_secret_ref_to_file",
 ]
