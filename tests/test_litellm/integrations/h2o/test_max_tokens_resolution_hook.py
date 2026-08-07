@@ -421,6 +421,88 @@ async def test_nothing_moves_when_every_field_is_dropped(hook):
     assert tokens(out) == {"max_tokens": 50}
 
 
+@pytest.mark.asyncio
+async def test_a_directive_pointing_at_a_dropped_field_still_saves_the_limit(hook):
+    """Contradictory config must not silently unbound the request.
+
+    `use_max_completion_tokens: false` says "send max_tokens";
+    `additional_drop_params: ["max_tokens"]` says "strip max_tokens". Honouring
+    the directive literally leaves the value on the field litellm is about to
+    strip, so the caller's ceiling vanishes with no error. The value moves to the
+    field that survives instead — which still respects the drop, since the
+    dropped field is never sent.
+    """
+    out = await run_hook(hook, model="hosted_vllm/m", max_tokens=50,
+                         additional_drop_params=["max_tokens"],
+                         **{DIRECTIVE_PARAM: False})
+    assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_preference_that_is_dropped_keeps_the_callers_field(hook):
+    """The mirror case: the o-series preference is max_completion_tokens, but the
+    operator dropped it. The caller's own field is eligible, so it stays — no
+    resurrection of the dropped field."""
+    out = await run_hook(hook, model="openai/o3", max_tokens=50,
+                         additional_drop_params=["max_completion_tokens"])
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_nothing_moves_when_there_is_nowhere_valid_to_move_it(hook):
+    """`azure_text` has no max_completion_tokens at all, so a dropped
+    `max_tokens` has no valid destination. Leave the request as it arrived rather
+    than inventing a field the route does not have."""
+    out = await run_hook(hook, model="azure_text/gpt-35-turbo-instruct",
+                         api_version="2025-04-01-preview", max_tokens=50,
+                         additional_drop_params=["max_tokens"])
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_drop_list",
+                         ["max_tokens", {"max_tokens": True}, 5, None])
+async def test_a_malformed_drop_list_does_not_raise(hook, bad_drop_list):
+    """litellm's own `_should_drop_param` also requires a list, so a non-list
+    drop list is a no-op there too — this must agree rather than crash."""
+    out = await run_hook(hook, **AZURE_2025, max_tokens=50,
+                         additional_drop_params=bad_drop_list)
+    assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    ["hosted_vllm/Qwen/Qwen3-Next-80B-A3B", "hosted_vllm/moonshotai/Kimi-K2.5",
+     "hosted_vllm/deepseek-ai/DeepSeek-R1", "mistral/pixtral-large-2502",
+     "bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
+     "hosted_vllm/openai/gpt-oss-120b",
+     "hosted_vllm/meta-llama/Llama-3.3-70B-Instruct"],
+)
+async def test_no_false_positive_reasoning_detection(hook, model):
+    """Reasoning detection is delegated to litellm's substring-based
+    `is_o_series_model` / `is_model_gpt_5_model`, which could in principle fire on
+    an unrelated name. Pin every model route we actually serve."""
+    out = await run_hook(hook, model=model, max_tokens=50)
+    assert tokens(out) == {"max_tokens": 50}, f"{model} misread as reasoning"
+
+
+@pytest.mark.asyncio
+async def test_the_callers_kwargs_dict_is_never_mutated(hook):
+    """`wrapper_async` keeps using its own kwargs when the hook returns None, so
+    mutating in place would be an invisible side effect."""
+    original = dict(AZURE_2025, max_tokens=50)
+    snapshot = dict(original)
+    await hook.async_pre_call_deployment_hook(original, "acompletion")
+    assert original == snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_no_model_does_not_raise(hook):
+    out = await run_hook(hook, max_tokens=50, max_completion_tokens=64000)
+    assert tokens(out) == {"max_tokens": 50}
+
+
 # --------------------------------------------------------------------------
 # End to end through acompletion, per provider
 # --------------------------------------------------------------------------

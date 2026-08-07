@@ -28,15 +28,27 @@ different ways:
     h2oai/h2ogpte#11992 — 50 output tokens requested, 1666 returned,
     ``finish_reason: "stop"`` — and it is NOT Azure-specific.
 
-  * BOTH FIELDS ON THE WIRE. Providers that forward both send both, and Azure
-    2025+ api_versions reject that outright:
+  * BOTH FIELDS ON THE WIRE. Providers that forward both send both, and that is
+    rejected outright:
 
         AzureException BadRequestError - Setting 'max_tokens' and
         'max_completion_tokens' at the same time is not supported.
 
-    h2ogpt worked around that with ``additional_drop_params: ["max_tokens"]``,
+    Confirmed against the live ``h2ogpt2`` Azure deployment, and NOT
+    Azure-specific — raw OpenAI returns the same 400 for ``gpt-4o-mini``.
+    h2ogpt worked around it with ``additional_drop_params: ["max_tokens"]``,
     which traded the 400 for the first defect: the caller's value was dropped
     and the deployment ceiling applied instead.
+
+    Worth stating precisely what is NOT true, because it shaped an earlier
+    version of this file: "Azure 2025+ rejects ``max_tokens``" does not hold in
+    general. That deployment accepts EITHER field on its own, on api-version
+    2024-02-01, 2024-08-01-preview and 2025-04-01-preview alike; only the pair
+    fails. Azure's wording is "not supported with **this model**", so the
+    single-field rejection is model-specific — which is why the reasoning-model
+    preference below is keyed on the model rather than only on the api_version,
+    and why the load-bearing behaviour here is the collapse plus tighter-wins
+    rather than the field-name routing.
 
 WHY A HOOK, AND WHY THIS HOOK POINT
 -----------------------------------
@@ -343,8 +355,19 @@ class MaxTokensResolutionHook(CustomLogger):
         if target is None and provider == "azure":
             target = _azure_target(kwargs.get("api_version"))
 
-        if target is not None and _eligible(target, supported, drop_list):
-            return target
+        if target is not None:
+            if _eligible(target, supported, drop_list):
+                return target
+            # The preferred field is dropped or unsupported. Fall through with no
+            # preference rather than returning it: an operator who wrote both
+            # `use_max_completion_tokens: false` AND
+            # `additional_drop_params: ["max_tokens"]` has given contradictory
+            # config, and honouring the directive literally would leave the value
+            # on the field litellm is about to strip — the caller's ceiling would
+            # vanish with no error. Falling through lets rule 3 below move it
+            # somewhere that survives, which respects the drop (the dropped field
+            # is still never sent) and keeps the limit.
+            target = None
 
         # 3. The caller's own field is being DROPPED. This was the original
         #    signal in the first attempt at this (h2oai/litellm#25): a deployment
