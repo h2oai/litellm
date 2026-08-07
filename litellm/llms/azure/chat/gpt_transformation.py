@@ -9,7 +9,6 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.types.llms.azure import (
     API_VERSION_MONTH_SUPPORTED_RESPONSE_FORMAT,
-    API_VERSION_YEAR_REQUIRING_MAX_COMPLETION_TOKENS,
     API_VERSION_YEAR_SUPPORTED_RESPONSE_FORMAT,
 )
 from litellm.types.utils import ModelResponse
@@ -148,34 +147,6 @@ class AzureOpenAIConfig(BaseConfig):
         # If same year, check if month is >= supported month
         else:
             return api_month >= supported_month
-
-    def get_preferred_max_tokens_param(
-        self, model: str, api_version: Optional[str] = None
-    ) -> Optional[str]:
-        """Azure's output-token field depends on the api_version.
-
-        2025+ versions (and the v1 API) reject ``max_tokens`` for ALL chat
-        models, not just the o-series, so the caller's value has to travel on
-        ``max_completion_tokens``. Older versions predate that field, so it has
-        to travel on ``max_tokens``.
-
-        Returns None when the api_version isn't a recognizable shape, which
-        leaves the caller's own field untouched.
-        """
-        if api_version is None:
-            return None
-
-        from litellm.llms.azure.common_utils import BaseAzureLLM
-
-        if BaseAzureLLM._is_azure_v1_api_version(api_version):
-            return "max_completion_tokens"
-
-        api_version_year = api_version.split("-")[0]
-        if len(api_version_year) != 4 or not api_version_year.isdigit():
-            return None
-        if int(api_version_year) >= API_VERSION_YEAR_REQUIRING_MAX_COMPLETION_TOKENS:
-            return "max_completion_tokens"
-        return "max_tokens"
 
     def map_openai_params(
         self,

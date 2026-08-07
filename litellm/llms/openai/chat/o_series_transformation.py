@@ -87,18 +87,6 @@ class OpenAIOSeriesConfig(OpenAIGPTConfig):
 
         return [param for param in all_openai_params if param not in non_supported_params]
 
-    def get_preferred_max_tokens_param(
-        self, model: str, api_version: Optional[str] = None
-    ) -> Optional[str]:
-        """O-series models take ``max_completion_tokens`` only.
-
-        ``map_openai_params`` below already moves ``max_tokens`` across, but it
-        writes the key that the generic mapping then overwrites when BOTH
-        fields are present. Declaring the preference is what makes a request
-        carrying both resolve to one field holding the tighter value.
-        """
-        return "max_completion_tokens"
-
     def map_openai_params(
         self,
         non_default_params: dict,

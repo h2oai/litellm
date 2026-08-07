@@ -188,16 +188,6 @@ class OpenAIGPT5Config(OpenAIGPTConfig):
 
         return [param for param in base_gpt_series_params if param not in non_supported_params]
 
-    def get_preferred_max_tokens_param(
-        self, model: str, api_version: Optional[str] = None
-    ) -> Optional[str]:
-        """gpt-5 models take ``max_completion_tokens`` only.
-
-        Same reason as the o-series: the rename below writes the key that the
-        generic mapping overwrites when both fields are present.
-        """
-        return "max_completion_tokens"
-
     def map_openai_params(
         self,
         non_default_params: dict,
