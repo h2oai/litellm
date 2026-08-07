@@ -221,7 +221,20 @@ def _azure_target(api_version: Any) -> Optional[str]:
         return None
     if int(year) >= AZURE_YEAR_REQUIRING_MAX_COMPLETION_TOKENS:
         return MAX_COMPLETION_TOKENS_PARAM
-    return MAX_TOKENS_PARAM
+    # Pre-2025: NO preference, deliberately.
+    #
+    # An earlier revision returned `max_tokens` here, on the reasoning that older
+    # api_versions predate `max_completion_tokens`. Measured against the live
+    # `h2ogpt2` deployment, that is not true — api-version 2024-02-01 and
+    # 2024-08-01-preview both accept `max_completion_tokens` on its own and
+    # return finish_reason=length with the requested 50 tokens. So renaming a
+    # lone `max_completion_tokens` there would mutate a request that works, for
+    # no measured benefit.
+    #
+    # Returning None does not weaken the fix: when BOTH fields are present a
+    # collapse is still required, and the no-preference branch in the hook
+    # already collapses onto `max_tokens`, which every provider understands.
+    return None
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -333,7 +346,28 @@ class MaxTokensResolutionHook(CustomLogger):
         if target is not None and _eligible(target, supported, drop_list):
             return target
 
-        # 3. No usable preference. One field is already canonical; two are not —
+        # 3. The caller's own field is being DROPPED. This was the original
+        #    signal in the first attempt at this (h2oai/litellm#25): a deployment
+        #    carrying `additional_drop_params: ["max_tokens"]` accepts only the
+        #    other field, so moving the value across is what keeps the caller's
+        #    limit instead of letting the drop destroy it — which is the whole
+        #    defect. Applies on ANY provider, not just Azure: an operator can put
+        #    that drop on a vllm or openai-compatible deployment too, and
+        #    h2ogpt's own `_drop()` writes into the same list.
+        #
+        #    Not in tension with "never resurrect a dropped param" — the target
+        #    still has to be eligible, so a field the operator dropped is never
+        #    the destination.
+        if target is None and not any(
+            _eligible(p, supported, drop_list) for p in present
+        ):
+            for candidate in MAX_TOKENS_PARAMS:
+                if candidate not in present and _eligible(
+                    candidate, supported, drop_list
+                ):
+                    return candidate
+
+        # 4. No usable preference. One field is already canonical; two are not —
         #    leaving both is what makes the last-wins provider maps pick the
         #    looser value, so collapse onto whichever field is eligible,
         #    preferring `max_tokens` since every provider understands it.

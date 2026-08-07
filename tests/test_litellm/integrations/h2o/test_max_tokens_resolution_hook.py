@@ -119,12 +119,31 @@ async def test_azure_2025_and_v1_use_completion_tokens(hook, api_version):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api_version",
-                         ["2024-08-01-preview", "2023-12-01-preview"])
-async def test_pre_2025_azure_uses_max_tokens(hook, api_version):
-    """Older api_versions predate max_completion_tokens, so the rename has to run
-    in the other direction."""
+                         ["2024-08-01-preview", "2024-02-01", "2023-12-01-preview"])
+async def test_pre_2025_azure_leaves_a_lone_field_alone(hook, api_version):
+    """No preference pre-2025, on evidence.
+
+    An earlier revision renamed a lone `max_completion_tokens` to `max_tokens`
+    here, reasoning that older api_versions predate the newer field. Measured
+    against the live `h2ogpt2` deployment that is false: api-version 2024-02-01
+    and 2024-08-01-preview both accept `max_completion_tokens` alone and return
+    finish_reason=length with the requested 50 tokens. Renaming would mutate a
+    request that already works.
+    """
     out = await run_hook(hook, model="azure/gpt-4o-mini",
                          api_version=api_version, max_completion_tokens=50)
+    assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_version", ["2024-08-01-preview", "2024-02-01"])
+async def test_pre_2025_azure_still_collapses_the_pair(hook, api_version):
+    """Having no preference must not weaken the actual fix: the pair is what
+    live Azure rejects, on every api-version tested, so it still has to become
+    one field with the tighter value."""
+    out = await run_hook(hook, model="azure/gpt-4o-mini",
+                         api_version=api_version,
+                         max_tokens=50, max_completion_tokens=64000)
     assert tokens(out) == {"max_tokens": 50}
 
 
@@ -133,7 +152,7 @@ async def test_pre_2025_azure_uses_max_tokens(hook, api_version):
     [
         ("2025-04-01-preview", MAX_COMPLETION_TOKENS_PARAM),
         ("preview", MAX_COMPLETION_TOKENS_PARAM),
-        ("2024-08-01-preview", MAX_TOKENS_PARAM),
+        ("2024-08-01-preview", None),
         ("garbage", None),
         (2025, None),
         (b"2025-04-01", None),
@@ -362,6 +381,44 @@ async def test_both_fields_collapse_onto_the_one_not_dropped(hook):
                          max_tokens=50, max_completion_tokens=64000,
                          additional_drop_params=["max_tokens"])
     assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    ["hosted_vllm/my-model", "openai/gpt-4o-mini",
+     "anthropic/claude-sonnet-4-5-20250929"],
+)
+async def test_a_dropped_caller_field_moves_rather_than_vanishes(hook, model):
+    """h2oai/litellm#25's original signal, which this must not lose.
+
+    A deployment carrying `additional_drop_params: ["max_tokens"]` accepts only
+    the other field. Leaving the request alone means the drop destroys the
+    caller's limit — the exact defect. Applies on ANY provider, not just Azure:
+    an operator can put that drop on a vllm or openai-compatible deployment, and
+    h2ogpt's own `_drop()` writes into the same list.
+    """
+    out = await run_hook(hook, model=model, max_tokens=50,
+                         additional_drop_params=["max_tokens"])
+    assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_completion_tokens_field_moves_the_other_way(hook):
+    out = await run_hook(hook, model="hosted_vllm/my-model",
+                         max_completion_tokens=50,
+                         additional_drop_params=["max_completion_tokens"])
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_nothing_moves_when_every_field_is_dropped(hook):
+    """There is nowhere to put it, and inventing a destination would defeat the
+    drop."""
+    out = await run_hook(hook, model="hosted_vllm/my-model", max_tokens=50,
+                         additional_drop_params=["max_tokens",
+                                                 "max_completion_tokens"])
+    assert tokens(out) == {"max_tokens": 50}
 
 
 # --------------------------------------------------------------------------
