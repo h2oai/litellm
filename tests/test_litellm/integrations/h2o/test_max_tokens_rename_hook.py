@@ -138,13 +138,33 @@ async def test_malformed_drop_params_never_propagates(hook):
 
 
 @pytest.mark.asyncio
-async def test_azure_route_alone_triggers_the_rename(hook):
+async def test_azure_route_with_a_ceiling_triggers_the_rename(hook):
     """Reasoning Azure entries get max_completion_tokens but are exempt from
-    the drop, so the route itself has to be recognised."""
+    the drop, so route + ceiling has to be recognised without one."""
     out = await _run(hook, {"model": "azure/gpt-5-mini", "max_tokens": 50,
                             "max_completion_tokens": 16384})
     assert out["max_completion_tokens"] == 50
     assert "max_tokens" not in out
+
+
+@pytest.mark.asyncio
+async def test_azure_deployment_that_wants_max_tokens_is_untouched(hook):
+    """An Azure entry with `use_max_completion_tokens: false`, which is how an
+    older api_version deployment is expressed, generates max_tokens as the
+    ceiling with no max_completion_tokens and no drop. Whether Azure wants
+    max_tokens or max_completion_tokens is a function of api_version, not of
+    being Azure, so treating the route alone as sufficient would override a
+    deliberate operator choice on exactly these deployments."""
+    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 50,
+                            "api_version": "2024-02-01"})
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_azure_route_without_a_ceiling_or_drop_is_untouched(hook):
+    """Same rule stated directly on the predicate: route alone is not enough."""
+    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 50})
+    assert out is None
 
 
 @pytest.mark.asyncio

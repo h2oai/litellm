@@ -48,17 +48,26 @@ Fires only when BOTH hold for the deployment actually selected:
 
   * the call is a chat completion, and
   * the request carries a positive integer `max_tokens`, and
-  * the selected deployment is one that discards or rejects `max_tokens`,
-    i.e. it lists `max_tokens` in `additional_drop_params`, or it is an Azure
-    route.
+  * the selected deployment lists `max_tokens` in `additional_drop_params`,
+    OR it has a configured `max_completion_tokens` AND is an Azure route.
 
-A configured `max_completion_tokens` is deliberately NOT a trigger on its own.
-`convert_model_to_litellm_config` sets it for every reasoning model, Azure or
-not (`use_completion_tokens = is_reasoning_model or is_azure_provider`), and
-only the Azure branch adds the drop. Treating it as a trigger would strip
-`max_tokens` from non-Azure providers that need it, leaving those requests with
-no ceiling at all, which is worse than the bug being fixed. It also cannot be
-distinguished from a caller-supplied value once kwargs are merged.
+Neither of those last two signals is sufficient alone, and they fail in
+opposite directions.
+
+`max_completion_tokens` alone is too broad: `convert_model_to_litellm_config`
+sets it for every reasoning model, Azure or not
+(`use_completion_tokens = is_reasoning_model or is_azure_provider`), and only
+the Azure branch adds the drop. Firing on a non-Azure provider would strip
+`max_tokens` from one that needs it, leaving the request with no ceiling at
+all, which is worse than the bug being fixed.
+
+An Azure route alone is also too broad: whether an Azure deployment wants
+`max_tokens` or `max_completion_tokens` depends on its api_version, not merely
+on being Azure, and the same model name can differ between deployments. An
+entry can say so explicitly, and `use_max_completion_tokens: false` (how an
+older api_version deployment is expressed) generates `max_tokens` as the
+ceiling with NO `max_completion_tokens` and NO drop. Renaming there would
+override a deliberate operator choice.
 
 Deployments that natively accept `max_tokens` (Anthropic, Bedrock, vLLM,
 non-2025 Azure) are left untouched, including when they share a model group
@@ -150,15 +159,38 @@ class MaxTokensRenameHook(CustomLogger):
         Read straight off the merged kwargs rather than the router, so a mixed
         model group is judged per selected deployment instead of per group.
         """
+        # The explicit signal: convert_model_to_litellm_config decided this
+        # deployment discards max_tokens, so the caller's value can only
+        # survive as max_completion_tokens.
         drop = kwargs.get("additional_drop_params") or []
         if isinstance(drop, (list, tuple)) and "max_tokens" in drop:
             return True
-        # Azure 2025+ rejects max_tokens outright. Reasoning Azure entries are
-        # exempt from the drop above but still need the rename, so recognise
-        # the route itself. custom_llm_provider is not always populated at this
-        # point, so the prefixed model string is the primary signal.
+
+        # Otherwise require BOTH signals: a configured max_completion_tokens
+        # AND an Azure route. Either one alone is too broad, in opposite
+        # directions:
+        #
+        #   max_completion_tokens alone -- convert_model_to_litellm_config sets
+        #   it for every reasoning model, Azure or not, and only the Azure
+        #   branch adds the drop. Firing on a non-Azure provider would strip
+        #   max_tokens from one that needs it, leaving no ceiling at all.
+        #
+        #   Azure route alone -- whether an Azure deployment wants max_tokens
+        #   or max_completion_tokens depends on its api_version, not just on
+        #   being Azure, and the entry can say so explicitly. An entry with
+        #   `use_max_completion_tokens: false` (how an older api_version
+        #   deployment is expressed) generates max_tokens as the ceiling, NO
+        #   max_completion_tokens and NO drop. Renaming there would override a
+        #   deliberate operator choice.
+        #
+        # Requiring both leaves that case alone while still covering reasoning
+        # Azure entries, which carry a ceiling but are exempt from the drop.
+        if kwargs.get("max_completion_tokens") is None:
+            return False
         if kwargs.get("custom_llm_provider") == "azure":
             return True
+        # custom_llm_provider is not always populated at this point, so the
+        # prefixed model string is the primary Azure signal.
         model = kwargs.get("model")
         return isinstance(model, str) and model.startswith("azure/")
 
