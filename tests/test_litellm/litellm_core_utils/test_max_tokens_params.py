@@ -122,7 +122,7 @@ def test_no_token_fields_is_a_no_op():
     assert params == {"temperature": 0.5}
 
 
-@pytest.mark.parametrize("bad", [0, -1, None, "50", True, False, 1.5])
+@pytest.mark.parametrize("bad", [0, -1, None, "50", True, False])
 def test_never_invents_a_ceiling_from_an_unusable_value(bad):
     """Rule 3. A max_tokens of 0/None/"50"/True must not become a
     max_completion_tokens that truncates every response."""
@@ -133,14 +133,129 @@ def test_never_invents_a_ceiling_from_an_unusable_value(bad):
     assert params.get(MAX_COMPLETION_TOKENS_PARAM) is None
 
 
-def test_unusable_value_is_still_stripped_from_a_rejected_field():
-    """0 is not a ceiling worth preserving, and leaving it on a field the
-    provider rejects turns a garbage request into a guaranteed 400."""
-    params = {"max_tokens": 0}
-    resolve_max_tokens_params(
+@pytest.mark.parametrize("bad", [0, -1, "50", True, False, float("nan"), float("inf")])
+def test_an_unusable_value_is_left_exactly_as_it_arrived(bad):
+    """Rule 3's other half, and a regression guard.
+
+    An earlier revision stripped an unusable value from a field the provider
+    rejects, on the theory that a 0 is not a ceiling worth keeping. That was
+    wrong for every non-int shape: a client sending ``max_tokens: "50"`` had its
+    ceiling silently deleted and the request went out UNBOUNDED, where before it
+    was forwarded and rejected loudly. Garbage in must stay error out.
+    """
+    params = {"max_tokens": bad}
+    assert (
+        resolve_max_tokens_params(
+            params, BOTH_SUPPORTED, preferred_param=MAX_COMPLETION_TOKENS_PARAM
+        )
+        is None
+    )
+    assert params == {"max_tokens": bad} or (
+        # NaN != NaN, so compare identity for that one
+        isinstance(bad, float) and params["max_tokens"] is bad
+    )
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(50.0, 50), (49.6, 50), (0.4, 1), (1e3, 1000)],
+)
+def test_a_float_ceiling_is_coerced_not_discarded(value, expected):
+    """A float ``max_tokens`` really does reach litellm —
+    ``AnthropicConfig.map_openai_params`` coerces one with
+    ``max(1, int(round(value)))``. An earlier revision treated floats as
+    unusable and deleted them, silently unbounding the request."""
+    params = {"max_tokens": value}
+    target = resolve_max_tokens_params(
         params, BOTH_SUPPORTED, preferred_param=MAX_COMPLETION_TOKENS_PARAM
     )
-    assert params == {}
+    assert target == MAX_COMPLETION_TOKENS_PARAM
+    assert params == {"max_completion_tokens": expected}
+
+
+# --------------------------------------------------------------------------
+# Rule 4 — an operator's drop list outranks the resolution
+# --------------------------------------------------------------------------
+
+
+def test_a_dropped_field_is_never_used_as_a_target():
+    """Regression: an earlier revision moved the value onto the preferred field
+    even when the operator had listed it in additional_drop_params, defeating
+    the drop and putting back a param they had explicitly removed."""
+    params = {"max_tokens": 50}
+    target = resolve_max_tokens_params(
+        params,
+        BOTH_SUPPORTED,
+        preferred_param=MAX_COMPLETION_TOKENS_PARAM,
+        additional_drop_params=["max_completion_tokens"],
+    )
+    assert target is None
+    assert params == {"max_tokens": 50}
+
+
+def test_both_fields_collapse_onto_the_one_that_is_not_dropped():
+    params = {"max_tokens": 50, "max_completion_tokens": 64000}
+    target = resolve_max_tokens_params(
+        params,
+        BOTH_SUPPORTED,
+        additional_drop_params=["max_tokens"],
+    )
+    assert target == MAX_COMPLETION_TOKENS_PARAM
+    assert params == {"max_completion_tokens": 50}
+
+
+def test_nothing_happens_when_both_fields_are_dropped():
+    params = {"max_tokens": 50, "max_completion_tokens": 64000}
+    assert (
+        resolve_max_tokens_params(
+            params,
+            BOTH_SUPPORTED,
+            preferred_param=MAX_COMPLETION_TOKENS_PARAM,
+            additional_drop_params=["max_tokens", "max_completion_tokens"],
+        )
+        is None
+    )
+    assert params == {"max_tokens": 50, "max_completion_tokens": 64000}
+
+
+def test_drop_list_is_respected_end_to_end():
+    optional_params = litellm.get_optional_params(
+        model="gpt-4o-mini",
+        custom_llm_provider="azure",
+        api_version="2025-04-01-preview",
+        drop_params=True,
+        max_tokens=50,
+        additional_drop_params=["max_completion_tokens"],
+    )
+    assert _token_params(optional_params) == {"max_tokens": 50}
+
+
+def test_azure_text_completions_route_is_not_renamed():
+    """`azure_text` is the legacy /completions endpoint, which has no
+    `max_completion_tokens` at all. It resolves to a different provider config,
+    so the Azure api_version rule must not reach it — the same class of hazard
+    that made the earlier deployment-hook approach break /v1/messages."""
+    optional_params = litellm.get_optional_params(
+        model="gpt-35-turbo-instruct",
+        custom_llm_provider="azure_text",
+        api_version="2025-04-01-preview",
+        drop_params=True,
+        max_tokens=50,
+    )
+    assert _token_params(optional_params) == {"max_tokens": 50}
+
+
+@pytest.mark.parametrize("api_version", [2025, b"2025-04-01", ["2025"], {}, 3.5])
+def test_a_non_string_api_version_yields_no_preference_rather_than_raising(api_version):
+    """This lookup runs on every Azure chat request, so a misconfigured
+    api_version must not turn param mapping into a traceback. An earlier
+    revision raised `unhashable type` on a list/dict api_version."""
+    assert (
+        litellm.AzureOpenAIConfig().get_preferred_max_tokens_param(
+            model="gpt-4o-mini", api_version=api_version
+        )
+        is None
+    )
 
 
 def test_unusable_value_alongside_a_usable_one_is_discarded():
@@ -157,6 +272,15 @@ def test_unusable_value_alongside_a_usable_one_is_discarded():
 )
 def test_preferred_param_for_directive(directive, expected):
     assert preferred_param_for_directive(directive) == expected
+
+
+@pytest.mark.parametrize("stray", ["false", "true", "", 0, 1, [], "no"])
+def test_only_the_exact_booleans_count_as_a_directive(stray):
+    """A stray value — a quoted `"false"` out of a YAML config, say — must read
+    as "not given" rather than being coerced by truthiness into the opposite of
+    what it looks like. `bool("false")` is True, which would send
+    `max_completion_tokens` to a deployment whose operator wrote `false`."""
+    assert preferred_param_for_directive(stray) is None
 
 
 # --------------------------------------------------------------------------

@@ -3883,10 +3883,11 @@ def get_optional_params(
     # limit to the deployment ceiling. See
     # litellm.litellm_core_utils.max_tokens_params for the rules.
     _max_tokens_api_version = api_version
-    if custom_llm_provider == "azure" and _max_tokens_api_version is None:
-        # Mirror the fallback chain the azure branch below applies, so the
-        # api_version-dependent preference is resolved against the version the
-        # request will actually be sent with.
+    if custom_llm_provider == "azure" and not _max_tokens_api_version:
+        # Mirror the fallback chain the azure branch below applies — including
+        # its `or`-based falsiness, so an empty-string api_version resolves the
+        # preference against the same version the request is actually sent with
+        # rather than against nothing.
         _max_tokens_api_version = (
             litellm.api_version
             or get_secret("AZURE_API_VERSION")
@@ -3903,6 +3904,7 @@ def get_optional_params(
         non_default_params=non_default_params,
         supported_params=supported_params,
         preferred_param=_preferred_max_tokens_param,
+        additional_drop_params=additional_drop_params,
     )
 
     _check_valid_arg(

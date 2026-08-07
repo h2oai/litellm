@@ -160,9 +160,12 @@ class AzureOpenAIConfig(BaseConfig):
         to travel on ``max_tokens``.
 
         Returns None when the api_version isn't a recognizable shape, which
-        leaves the caller's own field untouched.
+        leaves the caller's own field untouched. A non-str api_version (an int
+        year, bytes, a list) is treated as unrecognizable rather than allowed to
+        raise: this runs on every Azure chat request, so it must not turn a
+        misconfigured api_version into a traceback from param mapping.
         """
-        if api_version is None:
+        if not isinstance(api_version, str):
             return None
 
         from litellm.llms.azure.common_utils import BaseAzureLLM
