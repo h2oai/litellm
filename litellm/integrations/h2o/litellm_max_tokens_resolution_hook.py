@@ -175,6 +175,35 @@ def _directive_target(kwargs: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _resolved_azure_api_version(api_version: Any) -> Any:
+    """The api_version the request will actually be sent with.
+
+    A deployment may omit it, in which case litellm falls back to
+    ``litellm.api_version``, then ``AZURE_API_VERSION``, then
+    ``litellm.AZURE_DEFAULT_API_VERSION`` (a 2025 version today). Mirror that
+    chain — including its ``or``-based falsiness — or an Azure deployment with no
+    configured api_version resolves the field against nothing and sends
+    ``max_tokens`` to a version that rejects it.
+    """
+    if api_version:
+        return api_version
+    import litellm
+
+    try:
+        from litellm.secret_managers.main import get_secret
+    except Exception:
+        get_secret = None  # type: ignore[assignment]
+    env_version = None
+    if get_secret is not None:
+        try:
+            env_version = get_secret("AZURE_API_VERSION")
+        except Exception:
+            env_version = None
+    return (getattr(litellm, "api_version", None)
+            or env_version
+            or getattr(litellm, "AZURE_DEFAULT_API_VERSION", None))
+
+
 def _azure_target(api_version: Any) -> Optional[str]:
     """Azure's output-token field, from the api_version.
 
@@ -182,6 +211,7 @@ def _azure_target(api_version: Any) -> Optional[str]:
     (an int year, bytes, a list). This runs on every Azure chat request, so it
     must not turn a misconfigured api_version into a traceback.
     """
+    api_version = _resolved_azure_api_version(api_version)
     if not isinstance(api_version, str) or not api_version:
         return None
     if api_version in AZURE_V1_API_VERSIONS:

@@ -135,12 +135,9 @@ async def test_pre_2025_azure_uses_max_tokens(hook, api_version):
         ("preview", MAX_COMPLETION_TOKENS_PARAM),
         ("2024-08-01-preview", MAX_TOKENS_PARAM),
         ("garbage", None),
-        ("", None),
-        (None, None),
         (2025, None),
         (b"2025-04-01", None),
         (["2025"], None),
-        ({}, None),
     ],
 )
 def test_azure_target_never_raises_on_a_malformed_api_version(
@@ -149,6 +146,23 @@ def test_azure_target_never_raises_on_a_malformed_api_version(
     """This runs on every Azure chat request; a misconfigured api_version must
     not turn the hook into a traceback."""
     assert _azure_target(api_version) == expected
+
+
+@pytest.mark.parametrize("api_version", ["", None])
+def test_a_missing_api_version_falls_back_the_way_litellm_does(api_version):
+    """A deployment may omit api_version, in which case litellm falls back to
+    litellm.api_version / AZURE_API_VERSION / AZURE_DEFAULT_API_VERSION — a 2025
+    version today. Without mirroring that chain, such a deployment resolved the
+    field against nothing and sent max_tokens to a version that rejects it.
+    Caught by the h2ogpt cross-model matrix, not by hand."""
+    assert litellm.AZURE_DEFAULT_API_VERSION.startswith("2025")
+    assert _azure_target(api_version) == MAX_COMPLETION_TOKENS_PARAM
+
+
+@pytest.mark.asyncio
+async def test_azure_with_no_api_version_still_uses_completion_tokens(hook):
+    out = await run_hook(hook, model="azure/gpt-4o-mini", max_tokens=50)
+    assert tokens(out) == {"max_completion_tokens": 50}
 
 
 # --------------------------------------------------------------------------
