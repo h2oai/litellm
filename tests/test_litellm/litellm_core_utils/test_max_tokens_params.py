@@ -35,6 +35,7 @@ import litellm
 from litellm.litellm_core_utils.max_tokens_params import (
     MAX_COMPLETION_TOKENS_PARAM,
     MAX_TOKENS_PARAM,
+    MAX_TOKENS_PARAMS,
     preferred_param_for_directive,
     resolve_max_tokens_params,
 )
@@ -666,3 +667,94 @@ async def test_router_mixed_model_group_is_judged_per_deployment(mapped_params):
             mock_response="ok",
         )
         assert _token_params(mapped_params[-1]) == expected, deployment_id
+
+
+@pytest.mark.asyncio
+async def test_router_directive_applies_to_one_member_of_a_group(mapped_params):
+    """A per-deployment directive must be judged per deployment, not per group.
+    The azure member with the directive gets max_tokens; its identically-routed
+    sibling without it gets max_completion_tokens from the api_version."""
+    from litellm import Router
+
+    def azure_member(deployment_id, **extra):
+        params = {
+            "model": "azure/gpt-4o-mini",
+            "api_key": "fake-key",
+            "api_base": "https://example.openai.azure.com",
+            "api_version": "2025-04-01-preview",
+        }
+        params.update(extra)
+        return {
+            "model_name": "agent_auto",
+            "litellm_params": params,
+            "model_info": {"id": deployment_id},
+        }
+
+    router = Router(
+        model_list=[
+            azure_member("az", max_completion_tokens=16384),
+            azure_member("az-forced", use_max_completion_tokens=False),
+            {
+                "model_name": "agent_auto",
+                "litellm_params": {
+                    "model": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                    "max_tokens": 64000,
+                },
+                "model_info": {"id": "bed"},
+            },
+        ]
+    )
+    for deployment_id, expected in [
+        ("az", {"max_completion_tokens": 50}),
+        ("az-forced", {"max_tokens": 50}),
+        ("bed", {"maxTokens": 50}),
+    ]:
+        await router.acompletion(
+            model=deployment_id,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=50,
+            mock_response="ok",
+        )
+        assert _token_params(mapped_params[-1]) == expected, deployment_id
+
+
+# --------------------------------------------------------------------------
+# Interaction with the h2o max_tokens cap hook
+# --------------------------------------------------------------------------
+
+
+def _clip_like_the_cap_hook(params: dict, cap: int) -> None:
+    """What litellm_max_tokens_cap_hook does: clip both fields down to the
+    deployment ceiling, leaving anything non-int alone."""
+    for field in MAX_TOKENS_PARAMS:
+        value = params.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > cap:
+            params[field] = cap
+
+
+@pytest.mark.parametrize(
+    "request_params, cap",
+    [
+        ({"max_tokens": 50, "max_completion_tokens": 64000}, 16384),
+        ({"max_tokens": 99999, "max_completion_tokens": 64000}, 16384),
+        ({"max_tokens": 99999}, 8192),
+        ({"max_tokens": 5, "max_completion_tokens": 7}, 16384),
+    ],
+)
+def test_cap_hook_and_resolution_are_order_independent(request_params, cap):
+    """The cap hook runs pre-routing and this resolution runs during mapping, so
+    which one a deployment sees first depends on registration. Both orders must
+    land on the same value — asserted in the module docstring, pinned here."""
+    clip_first = dict(request_params)
+    _clip_like_the_cap_hook(clip_first, cap)
+    resolve_max_tokens_params(
+        clip_first, BOTH_SUPPORTED, preferred_param=MAX_COMPLETION_TOKENS_PARAM
+    )
+
+    resolve_first = dict(request_params)
+    resolve_max_tokens_params(
+        resolve_first, BOTH_SUPPORTED, preferred_param=MAX_COMPLETION_TOKENS_PARAM
+    )
+    _clip_like_the_cap_hook(resolve_first, cap)
+
+    assert clip_first == resolve_first
