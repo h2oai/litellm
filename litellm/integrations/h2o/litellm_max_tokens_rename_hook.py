@@ -54,6 +54,26 @@ Deployments that natively accept `max_tokens` (Anthropic, Bedrock, vLLM,
 non-2025 Azure) are left untouched, including when they share a model group
 with an Azure deployment.
 
+Two scope limits worth knowing:
+
+  * ASYNC PATH ONLY. `async_pre_call_deployment_hook` is dispatched by the
+    @client decorator's ASYNC wrapper (litellm/utils.py, in wrapper_async).
+    The sync wrapper does not dispatch it, so a direct sync
+    `litellm.completion()` or `Router._completion()` bypasses this hook. That
+    is fine for how the hook is deployed: it is registered only in the proxy
+    config, and the proxy maps /chat/completions to `acompletion`
+    (proxy/route_llm_request.py), so all proxied traffic takes the async path.
+    Code embedding litellm in-process and calling sync `completion()` would
+    not get the rename.
+
+  * The predicate reads the MERGED kwargs, which cannot distinguish a
+    deployment-configured `max_completion_tokens` from a caller-supplied one.
+    A request sending BOTH `max_tokens` and `max_completion_tokens` to a
+    max_tokens-native deployment is therefore rewritten. The reported case,
+    and everything h2oGPTe core emits, sends `max_tokens` alone. Keying only
+    on `additional_drop_params` would remove this edge, at the cost of not
+    firing for an Azure deployment configured with a ceiling but no drop.
+
 INTERACTION WITH THE CAP HOOK
 -----------------------------
 `litellm_max_tokens_cap_hook` clips both fields down to the deployment
