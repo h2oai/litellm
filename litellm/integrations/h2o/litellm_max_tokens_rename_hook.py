@@ -46,9 +46,19 @@ SCOPE
 -----
 Fires only when BOTH hold for the deployment actually selected:
 
+  * the call is a chat completion, and
   * the request carries a positive integer `max_tokens`, and
-  * that deployment expects `max_completion_tokens` (it has one configured,
-    or `max_tokens` in its `additional_drop_params`).
+  * the selected deployment is one that discards or rejects `max_tokens`,
+    i.e. it lists `max_tokens` in `additional_drop_params`, or it is an Azure
+    route.
+
+A configured `max_completion_tokens` is deliberately NOT a trigger on its own.
+`convert_model_to_litellm_config` sets it for every reasoning model, Azure or
+not (`use_completion_tokens = is_reasoning_model or is_azure_provider`), and
+only the Azure branch adds the drop. Treating it as a trigger would strip
+`max_tokens` from non-Azure providers that need it, leaving those requests with
+no ceiling at all, which is worse than the bug being fixed. It also cannot be
+distinguished from a caller-supplied value once kwargs are merged.
 
 Deployments that natively accept `max_tokens` (Anthropic, Bedrock, vLLM,
 non-2025 Azure) are left untouched, including when they share a model group
@@ -56,23 +66,24 @@ with an Azure deployment.
 
 Two scope limits worth knowing:
 
-  * ASYNC PATH ONLY. `async_pre_call_deployment_hook` is dispatched by the
-    @client decorator's ASYNC wrapper (litellm/utils.py, in wrapper_async).
-    The sync wrapper does not dispatch it, so a direct sync
+  * CHAT COMPLETIONS ONLY, enforced via `call_type`. The dispatch is NOT
+    chat-specific: `wrapper_async` runs it for every @client-decorated async
+    entrypoint. `litellm.anthropic_messages` (which backs /v1/messages, and
+    which bridges Azure and other non-Anthropic providers) declares
+    `max_tokens: int` as a REQUIRED parameter, so popping it there makes
+    litellm's own wrapper raise
+    `TypeError: anthropic_messages() missing 1 required positional argument`
+    on the following `await original_function(*args, **kwargs)`. That is
+    outside this hook's try/except and cannot be caught here, and the
+    traceback never names this hook. `atext_completion` (/v1/completions has
+    no `max_completion_tokens`) and `aembedding` reach the same dispatch.
+
+  * ASYNC PATH ONLY. The dispatch lives in the @client decorator's ASYNC
+    wrapper; the sync wrapper does not dispatch it, so a direct sync
     `litellm.completion()` or `Router._completion()` bypasses this hook. That
     is fine for how the hook is deployed: it is registered only in the proxy
     config, and the proxy maps /chat/completions to `acompletion`
-    (proxy/route_llm_request.py), so all proxied traffic takes the async path.
-    Code embedding litellm in-process and calling sync `completion()` would
-    not get the rename.
-
-  * The predicate reads the MERGED kwargs, which cannot distinguish a
-    deployment-configured `max_completion_tokens` from a caller-supplied one.
-    A request sending BOTH `max_tokens` and `max_completion_tokens` to a
-    max_tokens-native deployment is therefore rewritten. The reported case,
-    and everything h2oGPTe core emits, sends `max_tokens` alone. Keying only
-    on `additional_drop_params` would remove this edge, at the cost of not
-    firing for an Azure deployment configured with a ceiling but no drop.
+    (proxy/route_llm_request.py), so all proxied traffic is async.
 
 INTERACTION WITH THE CAP HOOK
 -----------------------------
@@ -122,25 +133,45 @@ class MaxTokensRenameHook(CustomLogger):
         return value if value > 0 else None
 
     @staticmethod
-    def _deployment_uses_completion_tokens(kwargs: Dict[str, Any]) -> bool:
-        """True when the SELECTED deployment expects `max_completion_tokens`.
+    def _is_chat_completion(call_type: Any) -> bool:
+        """True only for the chat-completion call types.
+
+        `call_type` is a `CallTypes` enum member (or None for an unrecognised
+        entrypoint), so compare on its value and tolerate a bare string.
+        """
+        return getattr(call_type, "value", call_type) in ("completion", "acompletion")
+
+    @staticmethod
+    def _deployment_discards_max_tokens(kwargs: Dict[str, Any]) -> bool:
+        """True when the SELECTED deployment would discard or reject
+        `max_tokens`, so the caller's limit only survives as
+        `max_completion_tokens`.
 
         Read straight off the merged kwargs rather than the router, so a mixed
         model group is judged per selected deployment instead of per group.
         """
-        if kwargs.get("max_completion_tokens") is not None:
-            return True
         drop = kwargs.get("additional_drop_params") or []
-        return isinstance(drop, (list, tuple)) and "max_tokens" in drop
+        if isinstance(drop, (list, tuple)) and "max_tokens" in drop:
+            return True
+        # Azure 2025+ rejects max_tokens outright. Reasoning Azure entries are
+        # exempt from the drop above but still need the rename, so recognise
+        # the route itself. custom_llm_provider is not always populated at this
+        # point, so the prefixed model string is the primary signal.
+        if kwargs.get("custom_llm_provider") == "azure":
+            return True
+        model = kwargs.get("model")
+        return isinstance(model, str) and model.startswith("azure/")
 
     async def async_pre_call_deployment_hook(
         self, kwargs: Dict[str, Any], call_type: Any
     ) -> Optional[dict]:
         try:
+            if not self._is_chat_completion(call_type):
+                return None
             requested = self._positive_int(kwargs.get("max_tokens"))
             if requested is None:
                 return None
-            if not self._deployment_uses_completion_tokens(kwargs):
+            if not self._deployment_discards_max_tokens(kwargs):
                 return None
 
             # A configured deployment ceiling (or a caller-supplied value) must

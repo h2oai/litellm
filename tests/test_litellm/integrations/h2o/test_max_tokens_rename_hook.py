@@ -130,9 +130,39 @@ async def test_plain_deployment_with_no_params_is_a_noop(hook):
 
 @pytest.mark.asyncio
 async def test_malformed_drop_params_never_propagates(hook):
-    """A non-list additional_drop_params must not fail the request."""
-    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 50,
+    """A non-list additional_drop_params must not raise. On a non-Azure model
+    it is the only possible signal, so the request is left alone."""
+    out = await _run(hook, {"model": "openrouter/some-model", "max_tokens": 50,
                             "additional_drop_params": "max_tokens"})
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_azure_route_alone_triggers_the_rename(hook):
+    """Reasoning Azure entries get max_completion_tokens but are exempt from
+    the drop, so the route itself has to be recognised."""
+    out = await _run(hook, {"model": "azure/gpt-5-mini", "max_tokens": 50,
+                            "max_completion_tokens": 16384})
+    assert out["max_completion_tokens"] == 50
+    assert "max_tokens" not in out
+
+
+@pytest.mark.asyncio
+async def test_non_azure_ceiling_alone_does_not_trigger_the_rename(hook):
+    """convert_model_to_litellm_config sets max_completion_tokens for EVERY
+    reasoning model, Azure or not, and only the Azure branch adds the drop.
+    Renaming on a non-Azure provider would strip max_tokens and leave the
+    request with no ceiling at all, which is worse than the bug being fixed."""
+    out = await _run(hook, {"model": "openrouter/grok-4", "max_tokens": 50,
+                            "max_completion_tokens": 16384})
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_native_deployment_with_caller_supplied_ceiling_is_untouched(hook):
+    """A caller sending BOTH fields to a max_tokens-native deployment must not
+    have max_tokens stripped."""
+    out = await _run(hook, dict(BEDROCK_KWARGS, max_completion_tokens=4096))
     assert out is None
 
 
@@ -235,3 +265,44 @@ async def test_litellm_dispatch_leaves_a_max_tokens_native_deployment_alone():
     assert seen is not None
     assert seen["max_tokens"] == 50, seen
     assert seen.get("max_completion_tokens") is None, seen
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_survives_the_rename_hook():
+    """litellm.anthropic_messages backs /v1/messages and bridges Azure, and it
+    declares max_tokens as a REQUIRED parameter. The deployment-hook dispatch
+    is not chat-specific, so popping max_tokens there made litellm's own
+    @client wrapper raise
+    `TypeError: anthropic_messages() missing 1 required positional argument`
+    on the next `await original_function(...)`. That is outside this hook's
+    try/except, and the traceback never names the hook.
+    """
+    import litellm
+
+    previous = litellm.callbacks
+    litellm.callbacks = [MaxTokensRenameHook()]
+    try:
+        await litellm.anthropic_messages(
+            model="azure/gpt-4o-mini",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=50,
+            max_completion_tokens=16384,        # merged in by the router
+            additional_drop_params=["max_tokens"],
+            api_key="dummy",
+            api_version="2025-04-01-preview",
+            api_base="https://example.openai.azure.com",
+            mock_response="ok",
+        )
+    finally:
+        litellm.callbacks = previous
+
+
+@pytest.mark.asyncio
+async def test_non_chat_call_types_are_skipped():
+    """Same guard at the unit level, for the other entrypoints that reach this
+    dispatch: /v1/completions has no max_completion_tokens, and embeddings
+    have no notion of one."""
+    hook = MaxTokensRenameHook()
+    for call_type in ("anthropic_messages", "atext_completion", "aembedding", None):
+        out = await hook.async_pre_call_deployment_hook(dict(AZURE_KWARGS), call_type)
+        assert out is None, f"{call_type} must not be rewritten"
