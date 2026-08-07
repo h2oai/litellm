@@ -17388,6 +17388,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/router/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Router Model List
+         * @description Returns the raw model list from the LiteLLM router without wildcard expansion
+         */
+        get: operations["router_model_list_v1_router_models_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/rust_control_plane/logs": {
         parameters: {
             query?: never;
@@ -25828,6 +25848,8 @@ export interface components {
              * @default false
              */
             use_litellm_proxy: boolean | null;
+            /** Use Max Completion Tokens */
+            use_max_completion_tokens?: boolean | null;
             /**
              * Use Xai Oauth
              * @description Use stored xAI OAuth credentials when no xAI API key is configured.
@@ -33652,6 +33674,8 @@ export interface components {
              * @default false
              */
             use_litellm_proxy: boolean | null;
+            /** Use Max Completion Tokens */
+            use_max_completion_tokens?: boolean | null;
             /**
              * Use Xai Oauth
              * @description Use stored xAI OAuth credentials when no xAI API key is configured.
@@ -55446,6 +55470,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    router_model_list_v1_router_models_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

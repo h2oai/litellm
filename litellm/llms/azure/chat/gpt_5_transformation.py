@@ -1,6 +1,6 @@
 """Support for Azure OpenAI gpt-5 model family."""
 
-from typing import List
+from typing import List, Optional
 
 import litellm
 from litellm.exceptions import UnsupportedParamsError
@@ -55,6 +55,17 @@ class AzureOpenAIGPT5Config(AzureOpenAIConfig, OpenAIGPT5Config):
         # if future model names coincidentally contain "gpt-5-chat" as an interior run.
         _normalized = model.split("/")[-1]  # strip provider prefix, e.g. "azure/"
         return ("gpt-5" in model and not _normalized.startswith("gpt-5-chat")) or "gpt5_series" in model
+
+    def get_preferred_max_tokens_param(
+        self, model: str, api_version: Optional[str] = None
+    ) -> Optional[str]:
+        """Always ``max_completion_tokens``, independent of api_version.
+
+        The MRO would otherwise reach ``AzureOpenAIConfig``'s api_version rule
+        first, which would answer ``max_tokens`` for a pre-2025 version — wrong
+        for a gpt-5 deployment, whose ``map_openai_params`` renames it anyway.
+        """
+        return "max_completion_tokens"
 
     def get_supported_openai_params(self, model: str) -> List[str]:
         """Get supported parameters for Azure OpenAI GPT-5 models.
