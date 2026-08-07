@@ -89,8 +89,16 @@ so popping it there makes litellm's own wrapper raise
 
 on the following ``await original_function(...)`` — outside this hook's
 ``try/except``, with a traceback that never names this hook. Reproduced, hence
-the gate. ``atext_completion`` is excluded for a different reason: ``/v1/
-completions`` has no ``max_completion_tokens`` at all.
+the gate.
+
+``atext_completion`` (``/v1/completions``) is handled separately rather than
+skipped: that route has no ``max_completion_tokens`` at all, so it never gets the
+rename — but it does still get the pair COLLAPSED onto ``max_tokens``. Skipping it
+outright meant that removing h2ogpt's ``additional_drop_params`` workaround left an
+Azure text-completion deployment mapping BOTH fields, moving toward the same 400
+the drop existed to prevent. Collapsing is safe there in a way it is not for
+``anthropic_messages``, because ``atext_completion`` does not declare
+``max_tokens`` as a required parameter.
 
 ASYNC PATH ONLY. The dispatch lives in the ``@client`` decorator's ASYNC
 wrapper, so a direct sync ``litellm.completion()`` bypasses this entirely — and
@@ -165,6 +173,17 @@ DIRECTIVE_PARAM = "use_max_completion_tokens"
 # Only these call types are chat completions. See the module docstring for what
 # popping max_tokens does to the others.
 CHAT_CALL_TYPES = ("completion", "acompletion")
+
+# The legacy /v1/completions route. It has no `max_completion_tokens` at all, so
+# it is NOT a chat call type — but it still needs the pair COLLAPSED, always onto
+# `max_tokens`. Without this, removing h2ogpt's `additional_drop_params` workaround
+# left an Azure text-completion deployment mapping BOTH fields
+# ({'max_tokens': 50, 'max_completion_tokens': 16384}), which moves toward the very
+# 400 the drop existed to prevent. Collapsing here is safe in a way that
+# `anthropic_messages` is not: `atext_completion` does not declare `max_tokens` as
+# a required parameter, so removing the other field cannot make litellm's own
+# wrapper raise.
+TEXT_COMPLETION_CALL_TYPES = ("text_completion", "atext_completion")
 
 # Providers whose model string really is an OpenAI model id, so litellm's
 # substring-based o-series / gpt-5 detection is meaningful. Everywhere else the
@@ -511,7 +530,12 @@ class MaxTokensResolutionHook(CustomLogger):
             modified.pop(DIRECTIVE_PARAM, None)
 
         try:
-            if getattr(call_type, "value", call_type) not in CHAT_CALL_TYPES:
+            resolved_call_type = getattr(call_type, "value", call_type)
+            forced_target: Optional[str] = None
+            if resolved_call_type in TEXT_COMPLETION_CALL_TYPES:
+                # /v1/completions: collapse, but only ever onto max_tokens.
+                forced_target = MAX_TOKENS_PARAM
+            elif resolved_call_type not in CHAT_CALL_TYPES:
                 return modified
 
             # An explicitly-None field counts as ABSENT, not as garbage: `None` is
@@ -549,7 +573,12 @@ class MaxTokensResolutionHook(CustomLogger):
             supported = _supported_params(bare_model or "", provider)
             drop_list = kwargs.get("additional_drop_params")
 
-            target = self._target_field(kwargs, supported, drop_list, present)
+            if forced_target is not None:
+                target = (forced_target
+                          if _eligible(forced_target, supported, drop_list)
+                          else None)
+            else:
+                target = self._target_field(kwargs, supported, drop_list, present)
             if target is None:
                 return modified
 

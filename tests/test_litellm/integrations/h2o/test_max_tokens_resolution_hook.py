@@ -392,9 +392,36 @@ async def test_the_pair_is_collapsed_even_when_no_field_is_eligible(hook):
 
 
 @pytest.mark.asyncio
+async def test_the_text_completion_route_collapses_onto_max_tokens(hook):
+    """/v1/completions has no `max_completion_tokens`, so it never gets the
+    rename — but it still needs the pair collapsed.
+
+    Skipping it outright meant that removing h2ogpt's
+    `additional_drop_params: ["max_tokens"]` left an Azure text-completion
+    deployment mapping BOTH fields, moving toward the same 400 the drop existed to
+    prevent. Safe here in a way it is not for anthropic_messages, because
+    atext_completion does not declare max_tokens as required.
+    """
+    out = await run_hook(hook, call_type="atext_completion",
+                         model="azure_text/gpt-35-turbo-instruct",
+                         api_version="2025-04-01-preview",
+                         max_tokens=50, max_completion_tokens=16384)
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_the_text_completion_route_is_never_renamed(hook):
+    """Even on an api_version whose chat route would prefer the other field."""
+    out = await run_hook(hook, call_type="atext_completion",
+                         model="azure/gpt-35-turbo-instruct",
+                         api_version="2025-04-01-preview", max_tokens=50)
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "call_type",
-    ["anthropic_messages", "atext_completion", "aembedding", "aimage_generation",
+    ["anthropic_messages", "aembedding", "aimage_generation",
      None, "unknown_future_entrypoint"],
 )
 async def test_non_chat_call_types_keep_their_max_tokens(hook, call_type):
