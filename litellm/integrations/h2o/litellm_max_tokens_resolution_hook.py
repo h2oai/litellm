@@ -108,10 +108,15 @@ value, because both reduce and this one takes a minimum. Verified live — a
 client asking for 99999 against a 16384 ceiling goes out as
 ``max_completion_tokens: 16384``.
 
-NEVER PROPAGATES
-----------------
-Any unexpected error leaves the request exactly as it arrived. Failing a request
-because a field could not be resolved would be worse than the defect.
+NEVER PROPAGATES, BUT NOT FAIL-OPEN FOR THE DIRECTIVE
+-----------------------------------------------------
+Any unexpected error leaves the TOKEN FIELDS exactly as they arrived — failing a
+request because a field could not be resolved would be worse than the defect.
+The directive is different: it is stripped before the ``try`` and the ``except``
+returns that stripped copy, because ``use_max_completion_tokens`` is not a
+recognized litellm param and exists only for this hook to consume. Returning the
+original kwargs on error would leak it into the request body and turn an internal
+bug into a 400 on every request to that deployment.
 """
 
 import os
@@ -406,16 +411,24 @@ class MaxTokensResolutionHook(CustomLogger):
     async def async_pre_call_deployment_hook(
         self, kwargs: Dict[str, Any], call_type: Any
     ) -> Optional[dict]:
-        try:
-            # The directive is not a recognized litellm param, so it must come
-            # off the request on EVERY call type — including the ones below that
-            # we otherwise leave alone — or it is forwarded to the provider in
-            # the body and rejected as an unrecognized argument.
-            modified: Optional[Dict[str, Any]] = None
-            if DIRECTIVE_PARAM in kwargs:
-                modified = dict(kwargs)
-                modified.pop(DIRECTIVE_PARAM, None)
+        # Stripping the directive happens FIRST and outside the try, and the
+        # except below returns this same value rather than None.
+        #
+        # "Leave the request exactly as it arrived" is the right failure policy
+        # for the token fields — but it is the WRONG one for the directive, which
+        # exists only because this hook removes it. Returning None on an
+        # unexpected error makes litellm keep the original kwargs, so an
+        # unrecognized `use_max_completion_tokens` reaches the provider body and
+        # is rejected: measured against an unpatched proxy as
+        #     {"max_tokens": 50, "use_max_completion_tokens": false, ...}
+        # So a bug in the resolution below must not be able to turn into a 400 on
+        # every request to that deployment.
+        modified: Optional[Dict[str, Any]] = None
+        if DIRECTIVE_PARAM in kwargs:
+            modified = dict(kwargs)
+            modified.pop(DIRECTIVE_PARAM, None)
 
+        try:
             if getattr(call_type, "value", call_type) not in CHAT_CALL_TYPES:
                 return modified
 
@@ -435,8 +448,7 @@ class MaxTokensResolutionHook(CustomLogger):
                 return modified
             resolved = min(values)
 
-            _, bare_model = _provider_and_model(kwargs)
-            provider, _ = _provider_and_model(kwargs)
+            provider, bare_model = _provider_and_model(kwargs)
             supported = _supported_params(bare_model or "", provider)
             drop_list = kwargs.get("additional_drop_params")
 
@@ -460,13 +472,16 @@ class MaxTokensResolutionHook(CustomLogger):
                       f"{target}={resolved}", flush=True)
             return modified
         except Exception as e:
-            # Never break a request over a field-name resolution.
+            # Never break a request over a field-name resolution — but DO keep the
+            # directive stripped (see the note above the try). Returning None here
+            # would hand litellm the original kwargs and leak the directive to the
+            # provider, turning an internal error into a 400 on every request.
             if verbose_full:
                 import traceback
                 print(f"MaxTokensResolutionHook: error in pre_call: {e}",
                       flush=True)
                 traceback.print_exc()
-            return None
+            return modified
 
 
 # Create the hook instance that LiteLLM will use

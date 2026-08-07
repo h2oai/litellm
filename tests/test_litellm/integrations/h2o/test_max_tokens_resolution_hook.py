@@ -714,7 +714,7 @@ async def test_cap_hook_and_resolution_are_order_independent(
 
 
 @pytest.mark.asyncio
-async def test_an_internal_error_leaves_the_request_untouched(hook, monkeypatch):
+async def test_an_internal_error_leaves_the_token_fields_untouched(hook, monkeypatch):
     """Failing a request because a field could not be resolved would be worse
     than the defect."""
     monkeypatch.setattr(
@@ -723,3 +723,38 @@ async def test_an_internal_error_leaves_the_request_untouched(hook, monkeypatch)
         lambda value: (_ for _ in ()).throw(RuntimeError("boom")))
     out = await run_hook(hook, **AZURE_2025, max_tokens=50)
     assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_an_internal_error_still_strips_the_directive(hook, monkeypatch):
+    """The fail-safe must not be fail-OPEN for the directive.
+
+    "Leave the request as it arrived" is right for the token fields and wrong for
+    `use_max_completion_tokens`, which exists only because this hook removes it.
+    Returning None on error hands litellm the original kwargs, so the
+    unrecognized key reaches the provider body and is rejected — measured against
+    an unpatched proxy as `{"max_tokens": 50, "use_max_completion_tokens": false}`.
+    An internal bug must not become a 400 on every request to that deployment.
+    """
+    monkeypatch.setattr(
+        "litellm.integrations.h2o.litellm_max_tokens_resolution_hook."
+        "_usable_int",
+        lambda value: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = await run_hook(hook, **AZURE_2025, max_tokens=50,
+                         **{DIRECTIVE_PARAM: False})
+    assert DIRECTIVE_PARAM not in out
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_an_error_before_the_call_type_gate_still_strips_the_directive(
+    hook, monkeypatch
+):
+    """Same guarantee when the throw happens on a non-chat call type."""
+    monkeypatch.setattr(
+        "litellm.integrations.h2o.litellm_max_tokens_resolution_hook."
+        "CHAT_CALL_TYPES",
+        property(lambda self: (_ for _ in ()).throw(RuntimeError("boom"))))
+    out = await run_hook(hook, call_type="anthropic_messages", **AZURE_2025,
+                         max_tokens=50, **{DIRECTIVE_PARAM: True})
+    assert DIRECTIVE_PARAM not in out
