@@ -1,12 +1,16 @@
 """Tests for the h2o MaxTokensRenameHook.
 
-Focus: Azure 2025+ deployments reject ``max_tokens``, so
-``launch_litellm.py`` configures them with ``max_completion_tokens`` plus
+Focus: Azure 2025+ deployments reject ``max_tokens``, so ``launch_litellm.py``
+configures them with ``max_completion_tokens`` plus
 ``additional_drop_params: ["max_tokens"]``. That drop stops the Azure 400 but
 silently DISCARDS the caller's limit, so a client asking for 50 output tokens
 receives the deployment ceiling instead (measured: 50 requested, 1666
-returned). This hook renames the field before the drop applies so the caller's
-intent survives, while leaving ``max_tokens``-native deployments untouched.
+returned). This hook renames the field before the drop applies.
+
+The hook is deployment-level on purpose. A group-level predicate would break
+MIXED model groups, which our generated config really contains: ``agent_auto``
+spans anthropic, azure, bedrock, gemini, mistral and openrouter under one
+model_name. See test_mixed_model_group_* below.
 """
 
 import pytest
@@ -21,138 +25,126 @@ def hook():
     return MaxTokensRenameHook()
 
 
-class _FakeRouter:
-    def __init__(self, model_list):
-        self.model_list = model_list
+# kwargs as they arrive at async_pre_call_deployment_hook, i.e. AFTER the router
+# merged the selected deployment's litellm_params. Values verified against a
+# live proxy running a mixed agent_auto group.
+AZURE_KWARGS = {
+    "model": "azure/gpt-4o-mini",
+    "max_tokens": 50,
+    "max_completion_tokens": 16384,
+    "additional_drop_params": ["max_tokens"],
+}
+BEDROCK_KWARGS = {
+    "model": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "max_tokens": 50,
+    "max_completion_tokens": None,
+    "additional_drop_params": None,
+}
 
 
-def _install_router(monkeypatch, model_list):
-    """Point the hook's ``llm_router`` lookup at a fake deployment table."""
-    import litellm.proxy.proxy_server as proxy_server
-
-    monkeypatch.setattr(proxy_server, "llm_router", _FakeRouter(model_list), raising=False)
-
-
-AZURE_DEPLOYMENT = [{
-    "model_name": "gpt-4o-mini",
-    "litellm_params": {
-        "model": "azure/gpt-4o-mini",
-        "max_completion_tokens": 16384,
-        "additional_drop_params": ["max_tokens"],
-    },
-}]
-
-BEDROCK_DEPLOYMENT = [{
-    "model_name": "claude-opus-4-6",
-    "litellm_params": {
-        "model": "bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
-        "max_tokens": 64000,
-    },
-}]
-
-
-async def _run(hook, data):
-    return await hook.async_pre_call_hook(
-        user_api_key_dict=None, cache=None, data=data, call_type="completion"
-    )
+async def _run(hook, kwargs):
+    return await hook.async_pre_call_deployment_hook(kwargs, "acompletion")
 
 
 @pytest.mark.asyncio
-async def test_renames_max_tokens_on_completion_tokens_deployment(hook, monkeypatch):
+async def test_renames_on_a_completion_tokens_deployment(hook):
     """The regression this hook exists for: the caller's 50 must survive as
     max_completion_tokens instead of being dropped."""
-    _install_router(monkeypatch, AZURE_DEPLOYMENT)
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 50})
+    out = await _run(hook, dict(AZURE_KWARGS))
+    assert out is not None
     assert "max_tokens" not in out
     assert out["max_completion_tokens"] == 50
 
 
 @pytest.mark.asyncio
-async def test_leaves_max_tokens_native_deployment_untouched(hook, monkeypatch):
-    """Anthropic/Bedrock/vLLM deployments accept max_tokens; renaming there
-    would break them."""
-    _install_router(monkeypatch, BEDROCK_DEPLOYMENT)
-    out = await _run(hook, {"model": "claude-opus-4-6", "max_tokens": 50})
-    assert out["max_tokens"] == 50
-    assert "max_completion_tokens" not in out
+async def test_leaves_a_max_tokens_native_deployment_untouched(hook):
+    """Anthropic/Bedrock/vLLM accept max_tokens; renaming there breaks them."""
+    out = await _run(hook, dict(BEDROCK_KWARGS))
+    assert out is None, "must not modify a max_tokens-native deployment"
 
 
 @pytest.mark.asyncio
-async def test_detects_completion_tokens_via_drop_params_alone(hook, monkeypatch):
-    """A deployment that only signals intent through additional_drop_params
-    (no configured ceiling) still gets the rename."""
-    _install_router(monkeypatch, [{
-        "model_name": "gpt-4o-mini",
-        "litellm_params": {"model": "azure/gpt-4o-mini",
-                           "additional_drop_params": ["max_tokens"]},
-    }])
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 128})
-    assert out == {"model": "gpt-4o-mini", "max_completion_tokens": 128}
-
-
-@pytest.mark.asyncio
-async def test_keeps_the_tighter_value_when_caller_sends_both(hook, monkeypatch):
-    """A caller sending both fields already expressed the tighter intent; the
-    rename must not raise their ceiling."""
-    _install_router(monkeypatch, AZURE_DEPLOYMENT)
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 50,
-                            "max_completion_tokens": 4096})
+async def test_mixed_model_group_azure_member_is_renamed(hook):
+    """Both members below share one model_name (agent_auto). The azure member
+    must be renamed..."""
+    out = await _run(hook, dict(AZURE_KWARGS, model="azure/gpt-4o-mini"))
+    assert out["max_completion_tokens"] == 50
     assert "max_tokens" not in out
-    assert out["max_completion_tokens"] == 50
 
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 4096,
-                            "max_completion_tokens": 50})
-    assert out["max_completion_tokens"] == 50
+
+@pytest.mark.asyncio
+async def test_mixed_model_group_native_member_keeps_max_tokens(hook):
+    """...and the bedrock member of the SAME group must keep max_tokens. A
+    group-level predicate returned true for both and corrupted this one."""
+    out = await _run(hook, dict(BEDROCK_KWARGS))
+    assert out is None
+    # and the caller's kwargs are genuinely unchanged
+    kwargs = dict(BEDROCK_KWARGS)
+    await _run(hook, kwargs)
+    assert kwargs["max_tokens"] == 50
+    assert kwargs.get("max_completion_tokens") is None
+
+
+@pytest.mark.asyncio
+async def test_detects_completion_tokens_via_drop_params_alone(hook):
+    """A deployment signalling intent only through additional_drop_params (no
+    configured ceiling) still gets the rename."""
+    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 128,
+                            "additional_drop_params": ["max_tokens"]})
+    assert out["max_completion_tokens"] == 128
+    assert "max_tokens" not in out
+
+
+@pytest.mark.asyncio
+async def test_never_raises_a_configured_ceiling(hook):
+    """A deployment ceiling tighter than the request must win."""
+    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 99999,
+                            "max_completion_tokens": 4096,
+                            "additional_drop_params": ["max_tokens"]})
+    assert out["max_completion_tokens"] == 4096
 
 
 @pytest.mark.parametrize("bad", [0, -1, None, "50", True])
 @pytest.mark.asyncio
-async def test_ignores_non_positive_int_max_tokens(hook, monkeypatch, bad):
+async def test_ignores_non_positive_int_max_tokens(hook, bad):
     """0/null/string/bool must never become a max_completion_tokens that
     truncates every response."""
-    _install_router(monkeypatch, AZURE_DEPLOYMENT)
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": bad})
-    assert "max_completion_tokens" not in out
-    assert out["max_tokens"] is bad
+    out = await _run(hook, dict(AZURE_KWARGS, max_tokens=bad))
+    assert out is None
 
 
 @pytest.mark.asyncio
-async def test_no_max_tokens_is_a_noop(hook, monkeypatch):
-    _install_router(monkeypatch, AZURE_DEPLOYMENT)
-    out = await _run(hook, {"model": "gpt-4o-mini", "messages": []})
-    assert out == {"model": "gpt-4o-mini", "messages": []}
+async def test_no_max_tokens_is_a_noop(hook):
+    out = await _run(hook, {"model": "azure/gpt-4o-mini",
+                            "max_completion_tokens": 16384,
+                            "additional_drop_params": ["max_tokens"]})
+    assert out is None
 
 
 @pytest.mark.asyncio
-async def test_unknown_model_is_a_noop(hook, monkeypatch):
-    """A model with no matching deployment must not be rewritten."""
-    _install_router(monkeypatch, AZURE_DEPLOYMENT)
-    out = await _run(hook, {"model": "some-other-model", "max_tokens": 50})
-    assert out["max_tokens"] == 50
-    assert "max_completion_tokens" not in out
-
-
-@pytest.mark.asyncio
-async def test_router_unavailable_is_a_noop(hook, monkeypatch):
-    """Outside the proxy context there is no router; leave the request alone
-    rather than guessing."""
-    import litellm.proxy.proxy_server as proxy_server
-
-    monkeypatch.setattr(proxy_server, "llm_router", None, raising=False)
+async def test_plain_deployment_with_no_params_is_a_noop(hook):
+    """A direct litellm.completion call with no deployment params attached."""
     out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 50})
-    assert out["max_tokens"] == 50
+    assert out is None
 
 
 @pytest.mark.asyncio
-async def test_router_error_never_propagates(hook, monkeypatch):
-    """A malformed deployment table must not fail the request."""
-    class _Exploding:
-        @property
-        def model_list(self):
-            raise RuntimeError("boom")
+async def test_malformed_drop_params_never_propagates(hook):
+    """A non-list additional_drop_params must not fail the request."""
+    out = await _run(hook, {"model": "azure/gpt-4o-mini", "max_tokens": 50,
+                            "additional_drop_params": "max_tokens"})
+    assert out is None
 
-    import litellm.proxy.proxy_server as proxy_server
 
-    monkeypatch.setattr(proxy_server, "llm_router", _Exploding(), raising=False)
-    out = await _run(hook, {"model": "gpt-4o-mini", "max_tokens": 50})
-    assert out["max_tokens"] == 50
+@pytest.mark.asyncio
+async def test_other_kwargs_are_preserved(hook):
+    """The hook returns the FULL kwargs dict; the dispatcher replaces kwargs
+    wholesale with whatever comes back, so dropping a key here would drop it
+    from the upstream request."""
+    kwargs = dict(AZURE_KWARGS, messages=[{"role": "user", "content": "hi"}],
+                  temperature=0.5, stream=True)
+    out = await _run(hook, kwargs)
+    assert out["messages"] == [{"role": "user", "content": "hi"}]
+    assert out["temperature"] == 0.5
+    assert out["stream"] is True
+    assert out["model"] == "azure/gpt-4o-mini"
