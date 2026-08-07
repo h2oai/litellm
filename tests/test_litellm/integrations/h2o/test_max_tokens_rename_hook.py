@@ -148,3 +148,90 @@ async def test_other_kwargs_are_preserved(hook):
     assert out["temperature"] == 0.5
     assert out["stream"] is True
     assert out["model"] == "azure/gpt-4o-mini"
+
+
+# ---------------------------------------------------------------------------
+# Integration: prove litellm ITSELF dispatches the hook on a real completion.
+#
+# The tests above call async_pre_call_deployment_hook directly, which cannot
+# catch the hook being registered but never invoked. The dispatch does not live
+# in router.py or proxy/utils.py (a static trace of those two misses it); it is
+# in the @client decorator that wraps litellm.completion / litellm.acompletion,
+# at litellm/utils.py async_pre_call_deployment_hook -> wrapper_async. Since the
+# router calls litellm.acompletion(**input_kwargs), every routed chat completion
+# passes through it.
+#
+# These drive a real litellm.acompletion and assert the rewrite reached the
+# provider-bound kwargs, so if upstream ever moves or drops that dispatch the
+# suite fails instead of the hook going quietly inert.
+# ---------------------------------------------------------------------------
+
+
+async def _drive_acompletion(**overrides):
+    """Run a real litellm.acompletion with the rename hook plus a recorder.
+
+    The recorder is registered AFTER the rename hook: the dispatcher feeds each
+    callback the accumulated kwargs, so the recorder observes what the rename
+    hook actually produced inside litellm's own pipeline.
+
+    NB the recorder subclasses CustomLogger directly. CustomLogger defines
+    async_pre_call_deployment_hook as a no-op, so a mixin ordered after it in
+    the MRO is silently shadowed and the recorder never records.
+    """
+    import litellm
+    from litellm.integrations.custom_logger import CustomLogger
+
+    class Recorder(CustomLogger):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def async_pre_call_deployment_hook(self, kwargs, call_type):
+            self.seen = dict(kwargs)
+            return None
+
+    recorder = Recorder()
+    previous = litellm.callbacks
+    litellm.callbacks = [MaxTokensRenameHook(), recorder]
+    try:
+        params = dict(
+            model="azure/gpt-4o-mini",
+            messages=[{"role": "user", "content": "hi"}],
+            api_key="dummy",
+            api_version="2025-04-01-preview",
+            api_base="https://example.openai.azure.com",
+            mock_response="ok",
+        )
+        params.update(overrides)
+        await litellm.acompletion(**params)
+    finally:
+        litellm.callbacks = previous
+    return recorder.seen
+
+
+@pytest.mark.asyncio
+async def test_litellm_dispatches_the_hook_and_applies_the_rename():
+    seen = await _drive_acompletion(
+        max_tokens=50,
+        max_completion_tokens=16384,
+        additional_drop_params=["max_tokens"],
+    )
+    assert seen is not None, (
+        "litellm never dispatched async_pre_call_deployment_hook; the hook "
+        "would be registered but inert on the chat completion path"
+    )
+    assert "max_tokens" not in seen, seen
+    assert seen["max_completion_tokens"] == 50, seen
+
+
+@pytest.mark.asyncio
+async def test_litellm_dispatch_leaves_a_max_tokens_native_deployment_alone():
+    """Same real pipeline, a deployment with neither signal: the request must
+    reach the provider with max_tokens intact."""
+    seen = await _drive_acompletion(
+        model="bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        max_tokens=50,
+    )
+    assert seen is not None
+    assert seen["max_tokens"] == 50, seen
+    assert seen.get("max_completion_tokens") is None, seen
