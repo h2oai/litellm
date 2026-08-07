@@ -264,11 +264,126 @@ async def test_the_directive_is_stripped_even_on_gated_call_types(
     assert DIRECTIVE_PARAM not in out
 
 
-@pytest.mark.parametrize("stray", ["false", "true", "", 0, 1, [], "no"])
-def test_only_the_exact_booleans_count_as_a_directive(stray):
-    """`bool("false")` is True, which would send max_completion_tokens to a
-    deployment whose operator wrote `false`."""
-    assert _directive_target({DIRECTIVE_PARAM: stray}) is None
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (True, MAX_COMPLETION_TOKENS_PARAM),
+        (False, MAX_TOKENS_PARAM),
+        (1, MAX_COMPLETION_TOKENS_PARAM),
+        (0, MAX_TOKENS_PARAM),
+        ("true", MAX_COMPLETION_TOKENS_PARAM),
+        ("false", MAX_TOKENS_PARAM),
+        ("True", MAX_COMPLETION_TOKENS_PARAM),
+        ("FALSE", MAX_TOKENS_PARAM),
+        (" false ", MAX_TOKENS_PARAM),
+        ("yes", MAX_COMPLETION_TOKENS_PARAM),
+        ("no", MAX_TOKENS_PARAM),
+        ("1", MAX_COMPLETION_TOKENS_PARAM),
+        ("0", MAX_TOKENS_PARAM),
+    ],
+)
+def test_the_directive_recognises_what_an_operator_plausibly_writes(value, expected):
+    """Truthiness is never used — `bool("false")` is True — but treating every
+    non-boolean as "not given" was not good enough either: on an Azure 2025
+    deployment the provider rule then supplied `max_completion_tokens` anyway, so
+    `"false"` still meant the INVERSE of the operator's intent, silently."""
+    assert _directive_target({DIRECTIVE_PARAM: value}) == expected
+
+
+@pytest.mark.parametrize("junk", ["", [], {}, 2, -1, "maybe", 1.5, None])
+def test_an_unrecognisable_directive_is_a_no_op(junk):
+    """Not a guess. Anything outside the recognised shapes falls through to
+    provider detection and is logged under H2OGPT_VERBOSE."""
+    assert _directive_target({DIRECTIVE_PARAM: junk}) is None
+
+
+def test_an_absent_directive_is_a_no_op():
+    assert _directive_target({}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("written, expected",
+                         [("false", "max_tokens"), (0, "max_tokens"),
+                          ("no", "max_tokens")])
+async def test_a_string_false_no_longer_means_its_opposite(hook, written, expected):
+    """Regression for the silent inversion: on Azure 2025 these used to come out
+    as `max_completion_tokens` because the api_version rule supplied it once the
+    directive was discarded."""
+    out = await run_hook(hook, **AZURE_2025, max_tokens=50,
+                         **{DIRECTIVE_PARAM: written})
+    assert tokens(out) == {expected: 50}
+
+
+# --------------------------------------------------------------------------
+# Rule 3, the mixed case — garbage next to a usable value
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("garbage", ["50", 0, -5, True, False])
+async def test_garbage_beside_a_usable_value_changes_nothing(hook, garbage):
+    """The mixed case, which rule 3 used to miss.
+
+    `values` filtered the unusable entry out but the pop loop still removed the
+    field carrying it, so on azure/gpt-4o-mini with a 64000 ceiling a client
+    sending `max_tokens: "50"` got `max_completion_tokens: 64000` and a 200 —
+    h2ogpte#11992's exact symptom — where before it got both fields and a loud
+    Azure 400. Garbage in must stay error out even when another field is usable.
+    """
+    out = await run_hook(hook, **AZURE_2025,
+                         max_tokens=garbage, max_completion_tokens=64000)
+    assert tokens(out) == {"max_tokens": garbage,
+                           "max_completion_tokens": 64000}
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_none_counts_as_absent_not_as_garbage(hook):
+    """`None` is the OpenAI SDK default and litellm strips None-valued params, so
+    it never reaches the wire. Blocking on it would disable the resolution for any
+    client that passes it explicitly."""
+    out = await run_hook(hook, **AZURE_2025,
+                         max_tokens=None, max_completion_tokens=64000)
+    assert tokens(out) == {"max_completion_tokens": 64000}
+
+
+# --------------------------------------------------------------------------
+# Rule 2 is scoped to providers whose model string is an OpenAI model id
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    ["hosted_vllm/o1-local", "hosted_vllm/my-o3-finetune",
+     "openrouter/o1-preview-clone", "hosted_vllm/gpt-5-lookalike"],
+)
+async def test_a_self_hosted_name_that_looks_reasoning_is_not_renamed(hook, model):
+    """litellm's detection is a substring match, and on a self-hosted route the
+    name is operator-chosen. TGI and older vLLM ignore `max_completion_tokens`, so
+    renaming there makes the ceiling silently disappear — and
+    `get_supported_openai_params` is no guard, since it reports that field
+    supported for every openai-compatible provider."""
+    out = await run_hook(hook, model=model, max_tokens=50)
+    assert tokens(out) == {"max_tokens": 50}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["openai/o3", "openai/gpt-5", "azure/o4-mini"])
+async def test_a_first_party_reasoning_name_still_is_renamed(hook, model):
+    out = await run_hook(hook, model=model,
+                         max_tokens=50, max_completion_tokens=64000)
+    assert tokens(out) == {"max_completion_tokens": 50}
+
+
+@pytest.mark.asyncio
+async def test_the_pair_is_collapsed_even_when_no_field_is_eligible(hook):
+    """An mt-only provider whose deployment also drops max_tokens. Emitting both
+    leaves UnsupportedParamsError on the table at drop_params=false, and "collapse
+    the pair" is the load-bearing guarantee."""
+    out = await run_hook(hook, model="xai/grok-4",
+                         max_tokens=50, max_completion_tokens=64000,
+                         additional_drop_params=["max_tokens"])
+    assert len(tokens(out)) == 1
 
 
 # --------------------------------------------------------------------------
@@ -673,11 +788,57 @@ async def test_end_to_end_other_params_are_not_collateral_damage(
 # --------------------------------------------------------------------------
 
 
-def _clip_like_the_cap_hook(params, cap):
-    for field in (MAX_TOKENS_PARAM, MAX_COMPLETION_TOKENS_PARAM):
-        value = params.get(field)
-        if isinstance(value, int) and not isinstance(value, bool) and value > cap:
-            params[field] = cap
+def _run_the_real_cap_hook(params, cap):
+    """Drive the ACTUAL MaxTokensCapHook, not a local reimplementation of it.
+
+    The previous version of this section reimplemented the clipping inline and
+    asserted only that clip-then-resolve == resolve-then-clip. That symmetry
+    assertion was vacuous: mutation-tested, it passed unchanged with `min`
+    replaced by `max` AND with `_target_field` stubbed to None. A symmetry-only
+    check cannot catch a symmetric bug — which is exactly how the float-bypass
+    below got through. So: real hook, absolute values.
+    """
+    from litellm.integrations.h2o.litellm_max_tokens_cap_hook import (
+        MaxTokensCapHook,
+    )
+
+    cap_hook = MaxTokensCapHook()
+    modified = []
+    cap_hook._cap_in(params, cap, "data", modified)
+    return params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_params, cap, expected",
+    [
+        # client tighter than the cap -> the client wins
+        ({"max_tokens": 50, "max_completion_tokens": 64000}, 16384,
+         {"max_completion_tokens": 50}),
+        # client looser than the cap -> the cap wins
+        ({"max_tokens": 99999, "max_completion_tokens": 64000}, 16384,
+         {"max_completion_tokens": 16384}),
+        ({"max_tokens": 99999}, 8192, {"max_completion_tokens": 8192}),
+        ({"max_tokens": 5, "max_completion_tokens": 7}, 16384,
+         {"max_completion_tokens": 5}),
+        # A FLOAT over the cap must still be capped. This is the regression the
+        # symmetry-only test could not see: the cap hook clipped `isinstance(v,
+        # int)` only, so a float bypassed it, and once this hook began coercing
+        # floats for every provider that turned a provider-rejected request into
+        # an accepted OVER-CAP one.
+        ({"max_tokens": 99999.0}, 8192, {"max_completion_tokens": 8192}),
+        ({"max_tokens": 99999.0, "max_completion_tokens": 64000}, 8192,
+         {"max_completion_tokens": 8192}),
+    ],
+)
+async def test_cap_hook_then_resolution_lands_on_the_absolute_value(
+    hook, request_params, cap, expected
+):
+    """The real cap hook runs first (it is an async_pre_call_hook, pre-routing),
+    then this resolution. Assert the VALUE, not just symmetry."""
+    params = _run_the_real_cap_hook(dict(request_params, **AZURE_2025), cap)
+    out = await run_hook(hook, **params)
+    assert tokens(out) == expected
 
 
 @pytest.mark.asyncio
@@ -687,23 +848,20 @@ def _clip_like_the_cap_hook(params, cap):
         ({"max_tokens": 50, "max_completion_tokens": 64000}, 16384),
         ({"max_tokens": 99999, "max_completion_tokens": 64000}, 16384),
         ({"max_tokens": 99999}, 8192),
-        ({"max_tokens": 5, "max_completion_tokens": 7}, 16384),
+        ({"max_tokens": 99999.0}, 8192),
     ],
 )
 async def test_cap_hook_and_resolution_are_order_independent(
     hook, request_params, cap
 ):
-    """`litellm_max_tokens_cap_hook` clips both fields from
-    `async_pre_call_hook` (pre-routing), so it normally runs first — but which
-    one a deployment sees first depends on registration. Both orders must land on
-    the same value."""
-    clip_first = dict(request_params, **AZURE_2025)
-    _clip_like_the_cap_hook(clip_first, cap)
+    """Which one a deployment sees first depends on callback registration, so both
+    orders must land on the same value. Kept as a SUPPLEMENT to the absolute
+    assertions above, never as the only check."""
+    clip_first = _run_the_real_cap_hook(dict(request_params, **AZURE_2025), cap)
     clip_first = await run_hook(hook, **clip_first)
 
     resolve_first = await run_hook(hook, **dict(request_params, **AZURE_2025))
-    resolve_first = dict(resolve_first)
-    _clip_like_the_cap_hook(resolve_first, cap)
+    resolve_first = _run_the_real_cap_hook(dict(resolve_first), cap)
 
     assert tokens(clip_first) == tokens(resolve_first)
 

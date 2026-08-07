@@ -93,20 +93,45 @@ the gate. ``atext_completion`` is excluded for a different reason: ``/v1/
 completions`` has no ``max_completion_tokens`` at all.
 
 ASYNC PATH ONLY. The dispatch lives in the ``@client`` decorator's ASYNC
-wrapper, so a direct sync ``litellm.completion()`` bypasses this. That is the
-one capability a core implementation would add, and it is not one we use: this
-hook is registered only in the proxy config, and the proxy maps
-``/chat/completions`` to ``acompletion``
-(``proxy/route_llm_request.py``), so all proxied traffic is async.
+wrapper, so a direct sync ``litellm.completion()`` bypasses this entirely — and
+the consequence is worse than "no resolution": with the core plumbing reverted,
+nothing strips the directive on that path either, so a sync call carrying
+``use_max_completion_tokens`` yields BOTH token fields plus
+``extra_body: {"use_max_completion_tokens": ...}``. That is the one capability a
+core implementation would add.
 
-INTERACTION WITH THE CAP HOOK
------------------------------
+It is not a path we use: this hook is registered only in the proxy config, the
+proxy maps ``/chat/completions`` to ``acompletion``
+(``proxy/route_llm_request.py``), and the ``/health`` chat probe also goes
+through ``litellm.acompletion`` (``health_check_helpers.py``). Anything that
+later embeds litellm in-process with a sync ``completion()`` call — a guardrail,
+a new route — would need the directive stripped some other way.
+
+INTERACTION WITH THE CAP HOOK — A COUPLED CONTRACT
+--------------------------------------------------
 ``litellm_max_tokens_cap_hook`` clips both fields down to the deployment ceiling
 from ``async_pre_call_hook`` (pre-routing), so it runs before this. The two are
 order-independent: clip-then-resolve and resolve-then-clip produce the same
-value, because both reduce and this one takes a minimum. Verified live — a
-client asking for 99999 against a 16384 ceiling goes out as
+value, because both reduce and this one takes a minimum. Verified live — a client
+asking for 99999 against a 16384 ceiling goes out as
 ``max_completion_tokens: 16384``.
+
+They are COUPLED, not merely adjacent, and this file is why. The cap hook used to
+clip ``isinstance(v, int)`` only, so a float sailed past the ceiling — survivable
+while nothing normalised floats, because the provider then rejected the float and
+the request failed loudly. Once this hook began coercing floats to ints for every
+provider (see ``_usable_int``), that gap turned a rejected request into an
+ACCEPTED over-cap one:
+
+    model_info.max_output_tokens = 8192, no litellm_params ceiling
+      client max_tokens=99999    -> cap clips -> 8192
+      client max_tokens=99999.0  -> cap SKIPS -> 99999   (over the cap)
+
+So ``_cap_in`` now clips floats too. If the coercion here is ever widened again —
+strings, Decimal — the cap hook has to widen with it, or the ceiling it exists to
+enforce is bypassable. The order-independence tests import the REAL cap hook and
+assert absolute values, not just symmetry, because a symmetry-only assertion
+cannot catch a symmetric bug and is exactly how this one got through.
 
 NEVER PROPAGATES, BUT NOT FAIL-OPEN FOR THE DIRECTIVE
 -----------------------------------------------------
@@ -140,6 +165,11 @@ DIRECTIVE_PARAM = "use_max_completion_tokens"
 # Only these call types are chat completions. See the module docstring for what
 # popping max_tokens does to the others.
 CHAT_CALL_TYPES = ("completion", "acompletion")
+
+# Providers whose model string really is an OpenAI model id, so litellm's
+# substring-based o-series / gpt-5 detection is meaningful. Everywhere else the
+# name is operator-chosen and a match would be a coincidence — see rule 2.
+REASONING_NAME_PROVIDERS = ("azure", "openai", "azure_ai", "azure_text")
 
 # First api_version year in which Azure chat completions reject `max_tokens` in
 # favour of `max_completion_tokens`:
@@ -180,15 +210,38 @@ def _usable_int(value: Any) -> Optional[int]:
 def _directive_target(kwargs: Dict[str, Any]) -> Optional[str]:
     """The field an explicit ``use_max_completion_tokens`` asks for.
 
-    Only the exact booleans count. A stray value — a quoted ``"false"`` out of a
-    YAML config — must read as "not given" rather than be coerced by truthiness
-    into the opposite of what it looks like, since ``bool("false")`` is True.
+    Truthiness is NEVER used: ``bool("false")`` is True, so a quoted ``"false"``
+    out of a hand-written YAML config would mean the opposite of what it reads
+    like. But treating every non-boolean as "not given" was not good enough
+    either — on an Azure 2025 deployment the provider rule then supplies
+    ``max_completion_tokens`` anyway, so ``"false"`` / ``0`` / ``""`` still ended
+    up meaning the inverse of the operator's intent, silently.
+
+    So the shapes an operator plausibly writes are recognised explicitly, and
+    anything else is a logged no-op rather than a silent guess. h2ogpt's own
+    config generation only ever emits real booleans, so the string forms can only
+    arrive from a hand-written litellm config.
     """
-    directive = kwargs.get(DIRECTIVE_PARAM)
-    if directive is True:
-        return MAX_COMPLETION_TOKENS_PARAM
-    if directive is False:
-        return MAX_TOKENS_PARAM
+    if DIRECTIVE_PARAM not in kwargs:
+        return None
+    directive = kwargs[DIRECTIVE_PARAM]
+
+    if directive is True or directive is False:
+        return (MAX_COMPLETION_TOKENS_PARAM if directive
+                else MAX_TOKENS_PARAM)
+    if isinstance(directive, int) and directive in (0, 1):
+        return (MAX_COMPLETION_TOKENS_PARAM if directive == 1
+                else MAX_TOKENS_PARAM)
+    if isinstance(directive, str):
+        normalised = directive.strip().lower()
+        if normalised in ("true", "yes", "1"):
+            return MAX_COMPLETION_TOKENS_PARAM
+        if normalised in ("false", "no", "0"):
+            return MAX_TOKENS_PARAM
+
+    if directive is not None and (verbose or verbose_full):
+        print(f"MaxTokensResolutionHook: ignoring unrecognised "
+              f"{DIRECTIVE_PARAM}={directive!r} — expected a boolean", flush=True)
     return None
 
 
@@ -206,14 +259,18 @@ def _resolved_azure_api_version(api_version: Any) -> Any:
         return api_version
     import litellm
 
+    # get_secret_STR, matching litellm's own api_version chain (main.py). Plain
+    # `get_secret` performs a secret-manager fetch when one is configured, and
+    # applies bool coercion — neither is wanted for a version string, in a hook
+    # that runs on every Azure request.
     try:
-        from litellm.secret_managers.main import get_secret
+        from litellm.secret_managers.main import get_secret_str
     except Exception:
-        get_secret = None  # type: ignore[assignment]
+        get_secret_str = None  # type: ignore[assignment]
     env_version = None
-    if get_secret is not None:
+    if get_secret_str is not None:
         try:
-            env_version = get_secret("AZURE_API_VERSION")
+            env_version = get_secret_str("AZURE_API_VERSION")
         except Exception:
             env_version = None
     return (getattr(litellm, "api_version", None)
@@ -355,7 +412,23 @@ class MaxTokensResolutionHook(CustomLogger):
         target = _directive_target(kwargs)
 
         # 2. Otherwise, what the provider itself requires.
-        if target is None and bare_model and _is_reasoning_model(bare_model):
+        #
+        # Reasoning detection is delegated to litellm's own `is_o_series_model` /
+        # `is_model_gpt_5_model`, which are SUBSTRING matches ("o1" in model). On a
+        # first-party route the deployment name is the model name, so that is fine.
+        # On a self-hosted route it is operator-chosen: `hosted_vllm/o1-local`
+        # matched and got `max_completion_tokens`, which TGI and older vLLM simply
+        # ignore — the ceiling silently disappears, and
+        # `get_supported_openai_params` is no guard because it reports that field
+        # supported for EVERY openai-compatible provider regardless of what the
+        # server accepts. So this rule is scoped to the providers whose names
+        # really are OpenAI model ids.
+        if (
+            target is None
+            and bare_model
+            and provider in REASONING_NAME_PROVIDERS
+            and _is_reasoning_model(bare_model)
+        ):
             target = MAX_COMPLETION_TOKENS_PARAM
         if target is None and provider == "azure":
             target = _azure_target(kwargs.get("api_version"))
@@ -404,7 +477,16 @@ class MaxTokensResolutionHook(CustomLogger):
         for candidate in MAX_TOKENS_PARAMS:
             if _eligible(candidate, supported, drop_list):
                 return candidate
-        return None
+
+        # Both fields present and NEITHER is eligible — e.g. an mt-only provider
+        # (xai, watsonx, replicate, azure_text, petals) whose deployment also
+        # drops max_tokens. "Collapse the pair" is the load-bearing guarantee, so
+        # still collapse: emitting both leaves `UnsupportedParamsError` on the
+        # table at `drop_params: false`, and with the proxy's `drop_params: true`
+        # it makes no difference to the ceiling (litellm strips both either way).
+        # Keep the caller's tighter value on the field they are most likely to
+        # have meant.
+        return present[0]
 
     # -- the hook ----------------------------------------------------------
 
@@ -432,7 +514,13 @@ class MaxTokensResolutionHook(CustomLogger):
             if getattr(call_type, "value", call_type) not in CHAT_CALL_TYPES:
                 return modified
 
-            present = [p for p in MAX_TOKENS_PARAMS if p in kwargs]
+            # An explicitly-None field counts as ABSENT, not as garbage: `None` is
+            # the OpenAI SDK's default and litellm strips None-valued params, so it
+            # never reaches the wire and must not block the resolution. Verified
+            # that ordinary requests never carry a None-valued token key at all —
+            # only a client explicitly passing None does.
+            present = [p for p in MAX_TOKENS_PARAMS
+                       if p in kwargs and kwargs[p] is not None]
             if not present:
                 return modified
 
@@ -440,11 +528,20 @@ class MaxTokensResolutionHook(CustomLogger):
                 v for v in (_usable_int(kwargs[p]) for p in present)
                 if v is not None
             ]
-            if not values:
-                # Nothing usable to move or tighten. Leave the request exactly as
-                # it arrived so the provider rejects it as loudly as it would
-                # have without us — rewriting it here would turn a
-                # garbage-in/error-out request into an unbounded one.
+            if len(values) != len(present):
+                # At least one field carries a value that is present, non-None and
+                # NOT a usable limit — 0, -1, "50", True. Change NOTHING, even if
+                # another field is usable.
+                #
+                # Resolving here would do two harmful things at once: discard the
+                # garbage field (so the deployment ceiling silently applies, which
+                # is h2ogpte#11992's exact symptom) AND suppress the loud error the
+                # request would otherwise get. Measured on azure/gpt-4o-mini with a
+                # 64000 ceiling: `max_tokens: "50"` used to produce both fields and
+                # an Azure 400; resolving it produced `max_completion_tokens:
+                # 64000` and a 200. Garbage in must stay error out — that is rule 3,
+                # and it has to hold in the MIXED case too, not just when every
+                # field is unusable.
                 return modified
             resolved = min(values)
 
