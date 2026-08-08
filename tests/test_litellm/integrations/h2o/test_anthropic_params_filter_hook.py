@@ -287,3 +287,100 @@ async def test_effort_lands_in_correct_subdict(hook):
     assert out["extra_body"]["thinking"] == {"type": "adaptive"}
     assert out["extra_body"].get("output_config") == {"effort": "high"}
     assert "output_config" not in out  # not written to top-level
+
+
+# --- the repairs must not depend on the public alias ----------------------
+#
+# Every repair in this hook decides by model NAME. At async_pre_call_hook time
+# that name is the proxy's public alias (the model_lock display name), which need
+# not resemble the deployment behind it. Measured against a live proxy -- same
+# deployment, same credentials, same request, only the alias differing:
+#
+#     model_name: claude-sonnet-4-5     -> 200, top_p stripped
+#     model_name: anthropic-sonnet-4-5  -> 400 `temperature` and `top_p` cannot
+#                                             both be specified
+#
+# so async_pre_call_deployment_hook re-runs the sequence against the resolved
+# deployment. These tests pin that, and pin that the alias-time dispatch is still
+# there (the two cover each other).
+
+
+async def _deployment(hook, kwargs, call_type="acompletion"):
+    return await hook.async_pre_call_deployment_hook(kwargs, call_type)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "anthropic-sonnet-4-5",   # no "claude" anywhere in it
+        "sonnet-4-5",
+        "fast-chat",              # a vanity name, the worst case
+        "gpt-4o",                 # actively misleading about its provider
+    ],
+)
+async def test_alias_time_dispatch_cannot_see_the_provider(hook, alias):
+    """Documents WHY the deployment hook is needed, at the alias dispatch."""
+    data = {"model": alias, "temperature": 0.2, "top_p": 0.9}
+    result = await _run(hook, data)
+    # Nothing to key off: the alias does not look Anthropic, so top_p survives
+    # here and would reach Anthropic as the rejected pair.
+    assert result["top_p"] == 0.9
+    assert result["temperature"] == 0.2
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic/claude-sonnet-4-5-20250929",
+        "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+)
+async def test_deployment_dispatch_strips_top_p_whatever_the_alias_was(hook, model):
+    """The resolved deployment IS visible, so the pair gets repaired."""
+    kwargs = {"model": model, "temperature": 0.2, "top_p": 0.9}
+    result = await _deployment(hook, kwargs)
+    assert result is not None, "the pair must be repaired at the deployment"
+    assert "top_p" not in result
+    assert result["temperature"] == 0.2
+
+
+async def test_deployment_dispatch_returns_none_when_nothing_needed_repair(hook):
+    """None tells litellm to keep the original kwargs -- do not hand back a copy
+    for every request, and do not touch a request that is already fine."""
+    kwargs = {"model": "anthropic/claude-sonnet-4-5-20250929", "temperature": 0.2}
+    assert await _deployment(hook, kwargs) is None
+
+
+async def test_deployment_dispatch_leaves_non_anthropic_sampling_alone(hook):
+    """temperature+top_p together is legal everywhere else and must survive."""
+    kwargs = {"model": "openai/gpt-4o-mini", "temperature": 0.2, "top_p": 0.9}
+    result = await _deployment(hook, kwargs)
+    if result is not None:          # other repairs may no-op-copy
+        assert result["top_p"] == 0.9
+        assert result["temperature"] == 0.2
+
+
+async def test_deployment_dispatch_skips_text_completion(hook):
+    """/v1/completions has no sampling semantics worth rewriting."""
+    kwargs = {"model": "anthropic/claude-sonnet-4-5-20250929",
+              "temperature": 0.2, "top_p": 0.9}
+    assert await _deployment(hook, kwargs, call_type="atext_completion") is None
+
+
+async def test_deployment_dispatch_does_not_mutate_the_caller_kwargs(hook):
+    """litellm chains the returned kwargs; mutating the input in place as well
+    would make the chaining order matter."""
+    kwargs = {"model": "anthropic/claude-sonnet-4-5-20250929",
+              "temperature": 0.2, "top_p": 0.9}
+    await _deployment(hook, kwargs)
+    assert kwargs["top_p"] == 0.9, "input must be left alone"
+
+
+async def test_deployment_dispatch_survives_a_broken_repair(hook, monkeypatch):
+    """A bug in a repair must not fail every request to the deployment."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("repair is broken")
+
+    monkeypatch.setattr(hook, "_remove_top_p_for_anthropic", boom)
+    kwargs = {"model": "anthropic/claude-sonnet-4-5-20250929", "top_p": 0.9}
+    assert await _deployment(hook, kwargs) is None

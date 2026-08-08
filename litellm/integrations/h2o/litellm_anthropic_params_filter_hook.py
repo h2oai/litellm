@@ -816,44 +816,7 @@ class AnthropicParamsFilterHook(CustomLogger):
             if verbose_full:
                 print(f"🧹 AnthropicParamsFilterHook: async_pre_call_hook called with call_type={call_type}, model={model}", flush=True)
 
-            if self._is_no_sampling_params_model(model):
-                # Newer Claude (Fable 5 / Mythos, Opus 4.7+, Sonnet 5): temperature,
-                # top_p and top_k are all deprecated (HTTP 400), and the legacy
-                # enabled/budget_tokens thinking API is rejected. Convert thinking
-                # to adaptive and strip all sampling params — never force
-                # temperature=1 (which would itself 400). Handled like OpenAI o1 /
-                # gpt-5 reasoning models.
-                # ORDERING IS LOAD-BEARING: the adaptive conversion must run before
-                # _ensure_max_tokens_for_thinking (below) so the latter sees no
-                # enabled/budget_tokens block and is a no-op (adaptive has no
-                # budget); otherwise a stale enabled block would inflate max_tokens.
-                self._force_adaptive_thinking_for_no_sampling(data, model)
-                self._remove_sampling_params_for_anthropic(data, model)
-            else:
-                # Force temperature=1 when thinking is enabled for Anthropic models
-                # This must be done BEFORE filtering Anthropic params to preserve the thinking parameter for Anthropic models
-                self._force_temperature_for_thinking(data, model)
-
-                # Remove top_p when temperature is also set for Anthropic models
-                # Anthropic API does not allow both to be specified simultaneously
-                # This must be done AFTER _force_temperature_for_thinking which may set temperature
-                self._remove_top_p_for_anthropic(data, model)
-
-            # Ensure max_tokens > thinking.budget_tokens for Anthropic models
-            # This must be done BEFORE filtering Anthropic params to access the thinking budget
-            self._ensure_max_tokens_for_thinking(data, model)
-
-            # Filter Anthropic-specific parameters for non-Anthropic models
-            self._filter_anthropic_params(data, model)
-
-            # Filter unsupported beta flags for Bedrock models
-            # Bedrock only supports a whitelist of beta flags - unsupported ones cause
-            # "invalid beta flag" errors (see https://github.com/BerriAI/litellm/issues/16726)
-            self._filter_bedrock_beta_flags(data, model)
-
-            # Limit max_tokens for models that need it (e.g., gpt-4o, gpt-4o-mini)
-            self._limit_max_tokens(data, model)
-
+            self._apply_repairs(data, model)
             return data
 
         except Exception as e:
@@ -862,6 +825,126 @@ class AnthropicParamsFilterHook(CustomLogger):
             traceback.print_exc()
             # On error, return data unchanged to not break the request
             return data
+
+    def _apply_repairs(self, data: Dict[str, Any], model: str) -> None:
+        """Every repair in this hook, applied in-place against `model`.
+
+        Factored out because the hook now runs at TWO dispatch points with two
+        different names for the same request (see
+        async_pre_call_deployment_hook). Keeping one sequence means the ordering
+        comments below cannot drift apart between them.
+        """
+        if self._is_no_sampling_params_model(model):
+            # Newer Claude (Fable 5 / Mythos, Opus 4.7+, Sonnet 5): temperature,
+            # top_p and top_k are all deprecated (HTTP 400), and the legacy
+            # enabled/budget_tokens thinking API is rejected. Convert thinking
+            # to adaptive and strip all sampling params — never force
+            # temperature=1 (which would itself 400). Handled like OpenAI o1 /
+            # gpt-5 reasoning models.
+            # ORDERING IS LOAD-BEARING: the adaptive conversion must run before
+            # _ensure_max_tokens_for_thinking (below) so the latter sees no
+            # enabled/budget_tokens block and is a no-op (adaptive has no
+            # budget); otherwise a stale enabled block would inflate max_tokens.
+            self._force_adaptive_thinking_for_no_sampling(data, model)
+            self._remove_sampling_params_for_anthropic(data, model)
+        else:
+            # Force temperature=1 when thinking is enabled for Anthropic models
+            # This must be done BEFORE filtering Anthropic params to preserve the thinking parameter for Anthropic models
+            self._force_temperature_for_thinking(data, model)
+
+            # Remove top_p when temperature is also set for Anthropic models
+            # Anthropic API does not allow both to be specified simultaneously
+            # This must be done AFTER _force_temperature_for_thinking which may set temperature
+            self._remove_top_p_for_anthropic(data, model)
+
+        # Ensure max_tokens > thinking.budget_tokens for Anthropic models
+        # This must be done BEFORE filtering Anthropic params to access the thinking budget
+        self._ensure_max_tokens_for_thinking(data, model)
+
+        # Filter Anthropic-specific parameters for non-Anthropic models
+        self._filter_anthropic_params(data, model)
+
+        # Filter unsupported beta flags for Bedrock models
+        # Bedrock only supports a whitelist of beta flags - unsupported ones cause
+        # "invalid beta flag" errors (see https://github.com/BerriAI/litellm/issues/16726)
+        self._filter_bedrock_beta_flags(data, model)
+
+        # Limit max_tokens for models that need it (e.g., gpt-4o, gpt-4o-mini)
+        self._limit_max_tokens(data, model)
+
+    # Call types this hook repairs at the deployment dispatch point. That
+    # dispatch is not chat-specific -- wrapper_async runs it for every
+    # @client-decorated async entrypoint -- and /v1/completions has no sampling
+    # semantics worth rewriting, so it is left alone.
+    DEPLOYMENT_CALL_TYPES = ("completion", "acompletion", "anthropic_messages")
+
+    async def async_pre_call_deployment_hook(
+        self, kwargs: Dict[str, Any], call_type: Any
+    ) -> Optional[dict]:
+        """Re-run the repairs against the RESOLVED DEPLOYMENT, not the alias.
+
+        Every repair in this hook decides by MODEL NAME. At async_pre_call_hook
+        time that name is the proxy's PUBLIC ALIAS -- the model_lock display name
+        -- which need not resemble the deployment behind it. So the repairs
+        silently did not fire for any entry whose alias fails
+        _is_anthropic_provider. Measured against a live proxy, same deployment,
+        same credentials, same request, only the alias differing:
+
+            model_name: claude-sonnet-4-5      -> 200, top_p stripped
+            model_name: anthropic-sonnet-4-5   -> 400 AnthropicException
+                                                  `temperature` and `top_p`
+                                                  cannot both be specified
+
+        The names that DO work are a coincidence of h2ogpte's naming convention
+        ("claude" appears in most of them). An entry named `sonnet-4-5`, or a
+        vanity name like `fast-chat`, pointed at Anthropic or at a Bedrock Claude
+        gets no repair at all -- and the whole point of these repairs is that a
+        user's bad parameter combination must not surface as a 400.
+
+        async_pre_call_deployment_hook runs AFTER the router picks a deployment
+        and BEFORE param mapping, so `kwargs['model']` here is the real
+        underlying model ("anthropic/claude-sonnet-4-5-20250929",
+        "bedrock/us.anthropic.claude-..."). Running the same sequence a second
+        time is safe: litellm chains the callbacks' returned kwargs
+        (utils.py:async_pre_call_deployment_hook), the repairs are removals or
+        min()-style caps, and each is name-gated so it no-ops for a model it does
+        not apply to.
+
+        The alias-time dispatch is KEPT rather than replaced. It is the only one
+        that sees a request before routing, and for _limit_max_tokens the alias
+        is often the better signal -- an Azure deployment resolves to
+        "azure/<deployment-name>", which need not contain "gpt-4o" even when the
+        deployment is gpt-4o. The two dispatch points cover each other.
+
+        Returns modified kwargs, or None when nothing needed repair (which tells
+        litellm to keep the originals).
+        """
+        try:
+            resolved_call_type = getattr(call_type, "value", call_type)
+            if resolved_call_type is not None and \
+                    resolved_call_type not in self.DEPLOYMENT_CALL_TYPES:
+                return None
+
+            model = kwargs.get('model') or ''
+            if not model:
+                return None
+
+            candidate = dict(kwargs)
+            self._apply_repairs(candidate, model)
+            if candidate == kwargs:
+                return None
+
+            if verbose or verbose_full:
+                print(f"🧹 AnthropicParamsFilterHook: repaired at the deployment "
+                      f"({model}, call_type={resolved_call_type})", flush=True)
+            return candidate
+
+        except Exception as e:
+            # Leave the request exactly as it arrived: a bug in a repair must not
+            # be able to fail every request to this deployment.
+            print(f"🧹 AnthropicParamsFilterHook: Error in "
+                  f"async_pre_call_deployment_hook: {e}", flush=True)
+            return None
 
 
 # Create the hook instance that LiteLLM will use
