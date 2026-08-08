@@ -123,8 +123,10 @@ def _apply_parallel_tool_use_config(
     # hybrid such as {"type": "auto", "name": <user>, "disable_parallel_tool_use": true}.
     additional_request_params.update(parallel_tool_use_config)
 
-    passthrough_tool_choice = parallel_tool_use_config.get("tool_choice")
-    if isinstance(passthrough_tool_choice, dict) and "type" in passthrough_tool_choice:
+    # No `"type" in ...` check: _map_parallel_tool_use_config sets type on every
+    # branch, so that condition could never be false. (Same reasoning that removed
+    # the unreachable merge branch above.)
+    if isinstance(parallel_tool_use_config.get("tool_choice"), dict):
         inference_params.pop("tool_choice", None)
 
 
@@ -1014,10 +1016,17 @@ class AmazonConverseConfig(BaseConfig):
         # A truthy non-list ``tools`` (e.g. a bare dict) passes a
         # non_default_params check but is skipped by the mapping loop's
         # isinstance(value, list) guard, so the payload came out with
-        # additionalModelRequestFields.tool_choice and NO toolConfig at all --
-        # the exact 400 this guard exists to prevent. In the other direction a
-        # json_schema response_format injects a synthetic tool into
-        # optional_params with nothing in non_default_params.
+        # additionalModelRequestFields.tool_choice and NO toolConfig at all. In the
+        # other direction a json_schema response_format injects a synthetic tool
+        # into optional_params with nothing in non_default_params.
+        #
+        # This narrows that payload but does not eliminate it: _bedrock_tools_pt
+        # later drops tools carrying neither "function" nor "input_schema" (the
+        # Responses built-ins such as web_search), so a request whose tools are ALL
+        # of that kind still reaches the provider with a tool_choice and no
+        # toolConfig. Measured, and unchanged from before this feature -- the only
+        # place the answer is known is _transform_request_helper, where
+        # bedrock_tools has already been computed.
         if not optional_params.get("tools"):
             return
 

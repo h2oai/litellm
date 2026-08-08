@@ -6107,8 +6107,15 @@ def test_response_format_injected_tools_still_honour_parallel_tool_calls():
     with nothing in non_default_params, so reading the raw value silently ignored
     parallel_tool_calls for it.
     """
+    # The bare id, NOT "anthropic.<id>": of the 59 models carrying
+    # supports_parallel_tool_use_config this is the only one WITHOUT
+    # supports_native_structured_output, so it is the only one that takes the
+    # synthetic-tool branch instead of outputConfig. Picking any other model makes
+    # this test vacuous -- no tool is injected, `toolConfig.tools` is empty, and a
+    # conditional assertion never runs. (An earlier version of this test did
+    # exactly that and passed with the fix reverted.)
     data = _converse_request(
-        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-sonnet-4-5-20250929-v1:0",
         {
             "response_format": {
                 "type": "json_schema",
@@ -6120,10 +6127,14 @@ def test_response_format_injected_tools_still_honour_parallel_tool_calls():
             "parallel_tool_calls": False,
         },
     )
-    listed = (data.get("toolConfig") or {}).get("tools") or []
-    if listed:  # only meaningful if litellm injected the synthetic tool
-        passthrough = data["additionalModelRequestFields"]["tool_choice"]
-        assert passthrough["disable_parallel_tool_use"] is True
+    listed = [t["toolSpec"]["name"] for t in (data.get("toolConfig") or {}).get("tools") or []]
+    assert listed == ["json_tool_call"], f"expected the synthetic tool, got {listed}"
+    passthrough = data["additionalModelRequestFields"]["tool_choice"]
+    assert passthrough == {
+        "type": "tool",
+        "name": "json_tool_call",
+        "disable_parallel_tool_use": True,
+    }, passthrough
 
 
 def test_tool_choice_none_is_not_reinvented_as_auto():
@@ -6143,3 +6154,18 @@ def test_tool_choice_none_is_not_reinvented_as_auto():
         drop_params=True,
     )
     assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_a_malformed_native_tool_choice_does_not_raise():
+    """Defensive: unreachable through get_optional_params (every writer of
+    optional_params["tool_choice"] produces a well-formed block), but the builder
+    reads native["tool"].get("name") and would raise AttributeError on a string."""
+    config = AmazonConverseConfig()
+    optional_params = {"tools": _TOOL_PARAM, "tool_choice": {"tool": "get_weather"}}
+    config._map_parallel_tool_use_config(
+        non_default_params={"tools": _TOOL_PARAM, "parallel_tool_calls": False},
+        optional_params=optional_params,
+    )
+    tool_choice = optional_params["_parallel_tool_use_config"]["tool_choice"]
+    assert tool_choice["type"] == "tool"
+    assert "name" not in tool_choice  # nothing usable to forward
