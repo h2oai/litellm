@@ -25848,8 +25848,6 @@ export interface components {
              * @default false
              */
             use_litellm_proxy: boolean | null;
-            /** Use Max Completion Tokens */
-            use_max_completion_tokens?: boolean | null;
             /**
              * Use Xai Oauth
              * @description Use stored xAI OAuth credentials when no xAI API key is configured.
@@ -33674,8 +33672,6 @@ export interface components {
              * @default false
              */
             use_litellm_proxy: boolean | null;
-            /** Use Max Completion Tokens */
-            use_max_completion_tokens?: boolean | null;
             /**
              * Use Xai Oauth
              * @description Use stored xAI OAuth credentials when no xAI API key is configured.

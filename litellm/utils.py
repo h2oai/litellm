@@ -54,10 +54,6 @@ import litellm.litellm_core_utils
 # audio_utils.utils is lazy-loaded - only imported when needed for transcription calls
 import litellm.litellm_core_utils.json_validation_rule
 from litellm._internal_context import is_internal_call
-from litellm.litellm_core_utils.max_tokens_params import (
-    preferred_param_for_directive,
-    resolve_max_tokens_params,
-)
 from litellm._lazy_imports import (
     _get_default_encoding,
     _get_modified_max_tokens,
@@ -3796,7 +3792,6 @@ def get_optional_params(
     web_search_options: Optional[OpenAIWebSearchOptions] = None,
     safety_identifier: Optional[str] = None,
     base_model: Optional[str] = None,
-    use_max_completion_tokens: Optional[bool] = None,
     **kwargs,
 ):
     passed_params = locals().copy()
@@ -3805,9 +3800,6 @@ def get_optional_params(
     # non_default_params / _check_valid_arg — it's a routing hint, not an
     # OpenAI param.
     passed_params.pop("base_model", None)
-    # Same for use_max_completion_tokens — it selects WHICH output-token field
-    # is sent, it is not itself a param any provider accepts.
-    passed_params.pop("use_max_completion_tokens", None)
     provider_config: Optional[BaseConfig] = None
     if custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         provider_config = ProviderConfigManager.get_provider_chat_config(
@@ -3874,36 +3866,6 @@ def get_optional_params(
     supported_params = supported_params or []
     allowed_openai_params = allowed_openai_params or []
     supported_params.extend(allowed_openai_params)
-
-    ## COLLAPSE max_tokens / max_completion_tokens ONTO ONE FIELD ##
-    # A request can arrive with both — typically a deployment configures one as
-    # a ceiling while the client sends the other. Resolve them here, once,
-    # before any provider mapping: forwarding both is what makes Azure 2025+
-    # 400 and what makes the last-wins provider maps silently widen a caller's
-    # limit to the deployment ceiling. See
-    # litellm.litellm_core_utils.max_tokens_params for the rules.
-    _max_tokens_api_version = api_version
-    if custom_llm_provider == "azure" and _max_tokens_api_version is None:
-        # Mirror the fallback chain the azure branch below applies, so the
-        # api_version-dependent preference is resolved against the version the
-        # request will actually be sent with.
-        _max_tokens_api_version = (
-            litellm.api_version
-            or get_secret("AZURE_API_VERSION")
-            or litellm.AZURE_DEFAULT_API_VERSION
-        )
-    _preferred_max_tokens_param = preferred_param_for_directive(
-        use_max_completion_tokens
-    )
-    if _preferred_max_tokens_param is None and provider_config is not None:
-        _preferred_max_tokens_param = provider_config.get_preferred_max_tokens_param(
-            model=model, api_version=_max_tokens_api_version  # type: ignore[arg-type]
-        )
-    resolve_max_tokens_params(
-        non_default_params=non_default_params,
-        supported_params=supported_params,
-        preferred_param=_preferred_max_tokens_param,
-    )
 
     _check_valid_arg(
         supported_params=supported_params or [],

@@ -5254,10 +5254,6 @@ def completion(  # type: ignore
             "service_tier": service_tier,
             "allowed_openai_params": kwargs.get("allowed_openai_params"),
             "base_model": base_model,
-            # Selects WHICH output-token field is sent (max_tokens vs
-            # max_completion_tokens), overriding the provider's own detection.
-            # Settable per-request or per-deployment via litellm_params.
-            "use_max_completion_tokens": kwargs.get("use_max_completion_tokens"),
         }
         optional_params = get_optional_params(**optional_param_args, **non_default_params)
         processed_non_default_params = pre_process_non_default_params(

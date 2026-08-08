@@ -245,12 +245,6 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
         default=False,
         description="Use stored xAI OAuth credentials when no xAI API key is configured.",
     )
-    # Which output-token field this deployment accepts. True -> send
-    # `max_completion_tokens`, False -> send `max_tokens`, None (default) ->
-    # let the provider config decide (for Azure, from the api_version).
-    # Overrides that detection, so it is the authoritative control when a
-    # deployment's requirement can't be inferred from provider + api_version.
-    use_max_completion_tokens: Optional[bool] = None
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     merge_reasoning_content_in_choices: Optional[bool] = False
     model_info: Optional[Dict] = None

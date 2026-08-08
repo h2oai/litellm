@@ -126,7 +126,27 @@ class MaxTokensCapHook(CustomLogger):
         for f in _MAX_TOKEN_FIELDS:
             if f in container:
                 v = container[f]
-                if isinstance(v, int) and v > cap:
+                # FLOATS COUNT. This used to clip `isinstance(v, int)` only, so a
+                # float sailed straight past the cap. That was survivable while
+                # nothing downstream normalised floats — the provider rejected the
+                # float and the request failed loudly (only AnthropicConfig
+                # coerced it). It stopped being survivable once
+                # litellm_max_tokens_resolution_hook started coercing floats to
+                # ints for every provider: the pair then turned a rejected request
+                # into an ACCEPTED over-cap one.
+                #
+                #   model_info.max_output_tokens = 8192, no litellm_params ceiling
+                #     client max_tokens=99999    -> clipped here    -> 8192
+                #     client max_tokens=99999.0  -> skipped here    -> 99999  (!)
+                #
+                # `bool` is excluded because it is an int subclass and True/False
+                # are not limits. NaN/inf compare False against `cap`, so they fall
+                # through untouched and the provider still rejects them.
+                if (
+                    isinstance(v, (int, float))
+                    and not isinstance(v, bool)
+                    and v > cap
+                ):
                     container[f] = cap
                     modified.append(f"{label}.{f}: {v} -> {cap}")
 

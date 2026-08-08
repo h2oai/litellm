@@ -192,22 +192,6 @@ class BaseConfig(ABC):
     def get_supported_openai_params(self, model: str) -> list:
         pass
 
-    def get_preferred_max_tokens_param(
-        self, model: str, api_version: Optional[str] = None
-    ) -> Optional[str]:
-        """Which output-token field this provider wants on the wire.
-
-        The OpenAI schema has two — ``max_tokens`` and its replacement
-        ``max_completion_tokens`` — and a request can arrive carrying both.
-        Return the one this provider accepts so that only that one is sent;
-        return None (the default) when the provider handles either and the
-        caller's choice should stand.
-
-        See ``litellm.litellm_core_utils.max_tokens_params`` for the resolution
-        this feeds.
-        """
-        return None
-
     def _add_response_format_to_tools(
         self,
         optional_params: dict,
