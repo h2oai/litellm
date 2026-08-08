@@ -224,3 +224,56 @@ async def test_insecure_skip_tls_verify_bypasses_ca_check(mtls_endpoint, tmp_pat
     )
     token = await credential.get_token()
     assert token.token == TOKEN_VALUE
+
+
+def test_extra_headers_are_masked_before_logging_but_not_on_the_wire():
+    """The minted bearer must not reach logging callbacks.
+
+    litellm's convention is that credentials live in headers, not in the request
+    BODY -- which is why additional_args["headers"] is masked and
+    complete_input_dict is not. extra_headers breaks that convention: it is a
+    provider param, so it travels inside the body dict and the OpenAI SDK only
+    lifts it out to real HTTP headers later. Measured with a real acompletion and a
+    capture CustomLogger, the token appeared at
+    kwargs.additional_args.complete_input_dict.extra_headers.Authorization -- the
+    dict langfuse/s3/datadog/otel/gcs all receive.
+    """
+    from litellm.litellm_core_utils.litellm_logging import (
+        _mask_extra_headers_in_additional_args,
+    )
+
+    token = "SUPERSECRET_TOKEN_abc123"
+    additional_args = {
+        "api_base": "https://gw.example/v1",
+        "complete_input_dict": {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "extra_headers": {"Authorization": f"Bearer {token}"},
+        },
+    }
+    masked = _mask_extra_headers_in_additional_args(additional_args)
+
+    assert token not in json.dumps(masked, default=str)
+    # A copy: the caller still uses the original dict to make the request, so
+    # masking in place would send masked headers upstream.
+    assert additional_args["complete_input_dict"]["extra_headers"]["Authorization"] == (
+        f"Bearer {token}"
+    )
+    # Everything else survives.
+    assert masked["complete_input_dict"]["model"] == "m"
+    assert masked["api_base"] == "https://gw.example/v1"
+
+
+def test_a_non_standard_auth_header_name_is_also_masked():
+    """h2o_oauth.header_name is operator-configurable, and litellm's default
+    keyword list only matches authorization/token/key/secret -- so a gateway using
+    X-Gateway-Auth would sail straight through a keyword-based mask."""
+    from litellm.litellm_core_utils.litellm_logging import (
+        _mask_extra_headers_in_additional_args,
+    )
+
+    token = "OPAQUE_GATEWAY_CREDENTIAL_xyz"
+    masked = _mask_extra_headers_in_additional_args(
+        {"complete_input_dict": {"extra_headers": {"X-Gateway-Auth": token}}}
+    )
+    assert token not in json.dumps(masked, default=str)

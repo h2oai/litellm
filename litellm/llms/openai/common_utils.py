@@ -61,8 +61,25 @@ def _resolve_ssl_config(
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     elif isinstance(ssl_verify, ssl.SSLContext):
-        # Caller-supplied context: they own it, including its cert chain.
-        context = ssl_verify
+        # A caller-supplied context is SHARED. Loading this deployment's chain
+        # into it would mutate an object other deployments verify with, and the
+        # last cert loaded would then be presented by all of them. Measured with
+        # two CA-signed client certs against a CERT_REQUIRED loopback server: the
+        # server saw CN=model-B for BOTH deployment A's and deployment B's
+        # handshakes. The client cache even looked healthy -- two separate httpx
+        # clients, both pointing at the one mutated context.
+        #
+        # That is precisely the cross-model credential leak the docstring above
+        # says this function exists to prevent, so refuse the combination rather
+        # than silently pick one identity. copy.copy() is not a fix: SSLContext
+        # copies share OpenSSL state.
+        raise ValueError(
+            "client_cert cannot be combined with ssl_verify=<ssl.SSLContext>: "
+            "loading the client chain would mutate the caller's shared context "
+            "and present this deployment's mTLS identity on every model that "
+            "shares it. Pass a CA bundle path (or an os.environ/ file:// "
+            "reference to one) as ssl_verify instead."
+        )
     else:
         ca_ref: Optional[str] = None
         if isinstance(ssl_verify, str):
@@ -241,9 +258,24 @@ class BaseOpenAILLM:
             # Hexadecimal representation of the hash
             hashed_api_key = hash_object.hexdigest()
 
+        # client_cert may be PEM TEXT, not a path: credential_ref_to_file
+        # explicitly supports inline PEM and materialises it to a 0600 file under
+        # /dev/shm precisely to keep key material off disk. Interpolating that
+        # string into the cache key would park a private key in
+        # litellm.in_memory_llm_clients_cache for the process lifetime, and any
+        # diagnostic that dumps cache keys would print it. Hash it, exactly as
+        # api_key is hashed above -- the identity still distinguishes deployments,
+        # which is what the key is for. Bonus: stops comparing multi-KB PEM strings
+        # on every client lookup.
+        hashed_client_cert = None
+        _client_cert = client_initialization_params.get("client_cert")
+        if _client_cert is not None:
+            hashed_client_cert = hashlib.sha256(repr(_client_cert).encode()).hexdigest()
+
         # Create a more readable cache key using a list of key-value pairs
         key_parts = [
             f"hashed_api_key={hashed_api_key}",
+            f"hashed_client_cert={hashed_client_cert}",
             f"is_async={client_initialization_params.get('is_async')}",
         ]
 
@@ -258,7 +290,9 @@ class BaseOpenAILLM:
             # another's requests. These are not OpenAI SDK __init__ params, so
             # _OPENAI_INIT_PARAMS (derived from that signature) does not cover them.
             "ssl_verify",
-            "client_cert",
+            # NOT "client_cert": it is covered by hashed_client_cert above, so
+            # listing it here would put the raw value (possibly inline PEM) back
+            # into the key.
         )
         openai_client_fields = (
             BaseOpenAILLM.get_openai_client_initialization_param_fields(client_type=client_type)

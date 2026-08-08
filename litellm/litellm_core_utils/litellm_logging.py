@@ -914,7 +914,9 @@ class Logging(LiteLLMLoggingBaseClass):
 
         self.model_call_details["input"] = input
         self.model_call_details["api_key"] = api_key
-        self.model_call_details["additional_args"] = additional_args
+        self.model_call_details["additional_args"] = _mask_extra_headers_in_additional_args(
+            additional_args
+        )
         self.model_call_details["log_event_type"] = "pre_api_call"
         if model:  # if model name was changes pre-call, overwrite the initial model call name with the new one
             self.model_call_details["model"] = model
@@ -1141,7 +1143,9 @@ class Logging(LiteLLMLoggingBaseClass):
             self.model_call_details["input"] = input
             self.model_call_details["api_key"] = api_key
             self.model_call_details["original_response"] = original_response
-            self.model_call_details["additional_args"] = additional_args
+            self.model_call_details["additional_args"] = _mask_extra_headers_in_additional_args(
+                additional_args
+            )
             self.model_call_details["log_event_type"] = "post_api_call"
 
             if self.litellm_request_debug:
@@ -3328,6 +3332,47 @@ class Logging(LiteLLMLoggingBaseClass):
         return result_copy
 
 
+def _mask_extra_headers_in_additional_args(additional_args: Any) -> Any:
+    """Mask `complete_input_dict["extra_headers"]` before it is logged.
+
+    litellm's convention is that credentials live in headers, not in the request
+    BODY -- which is why `additional_args["headers"]` is masked here and
+    `complete_input_dict` is not. `extra_headers` breaks that convention: it is a
+    provider param, so it travels inside the body dict, and the OpenAI SDK only
+    lifts it out to real HTTP headers later. The wire is fine; the LOG is not.
+
+    Measured with a real acompletion and a capture CustomLogger, a bearer minted
+    by the h2o OAuth hook appeared at
+
+        kwargs.additional_args.complete_input_dict.extra_headers.Authorization
+
+    which is the dict every CustomLogger receives (langfuse, s3, datadog, otel,
+    gcs, ...), plus `raw_request_typed_dict.raw_request_body` and the debug curl.
+    `standard_logging_object` is unaffected.
+
+    Returns a COPY: the caller still uses the original `data` dict to make the
+    request, so masking in place would send masked headers upstream.
+
+    mask_all_values=True on purpose -- the default keyword list only matches
+    names containing authorization/token/key/secret, and the auth header name is
+    operator-configurable (a gateway using `X-Gateway-Auth` would sail through).
+    """
+    if not isinstance(additional_args, dict):
+        return additional_args
+    complete_input_dict = additional_args.get("complete_input_dict")
+    if not isinstance(complete_input_dict, dict):
+        return additional_args
+    extra_headers = complete_input_dict.get("extra_headers")
+    if not isinstance(extra_headers, dict) or not extra_headers:
+        return additional_args
+    masked = dict(additional_args)
+    masked["complete_input_dict"] = {
+        **complete_input_dict,
+        "extra_headers": _get_masked_values(extra_headers, mask_all_values=True),
+    }
+    return masked
+
+
 def _get_masked_values(
     sensitive_object: dict,
     ignore_sensitive_values: bool = False,
@@ -3378,14 +3423,20 @@ def _get_masked_values(
             return v[: unmasked_length // 2] + "*" * number_of_asterisks + v[-unmasked_length // 2 :]
         return v[: unmasked_length // 2] + "*" * (len(v) - unmasked_length) + v[-unmasked_length // 2 :]
 
+    def _should_mask(key: str) -> bool:
+        if ignore_sensitive_values:
+            return False
+        if mask_all_values:
+            # The parameter existed and was threaded through the recursion but was
+            # never consulted here, so mask_all_values=True silently did nothing.
+            # It is needed for dicts whose KEYS are not predictable: an auth header
+            # name is operator-configurable, so "X-Gateway-Auth" carrying a live
+            # credential matched none of the keywords below and was logged verbatim.
+            return True
+        return any(keyword in key.lower() for keyword in sensitive_keywords)
+
     return {
-        k: (
-            v
-            if ignore_sensitive_values
-            or not any(sensitive_keyword in k.lower() for sensitive_keyword in sensitive_keywords)
-            else _mask_value(v)
-        )
-        for k, v in sensitive_object.items()
+        k: (_mask_value(v) if _should_mask(k) else v) for k, v in sensitive_object.items()
     }
 
 

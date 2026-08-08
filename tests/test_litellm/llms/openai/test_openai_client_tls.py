@@ -354,3 +354,40 @@ def test_tls_params_never_reach_the_upstream_request_body():
             f"{param} must be a litellm param, else it is sent to the provider "
             f"in the request body"
         )
+
+
+def test_client_cert_with_a_caller_supplied_sslcontext_is_refused():
+    """Loading the chain into a shared context makes every deployment that shares
+    it present THIS deployment's mTLS identity. Measured against a CERT_REQUIRED
+    loopback server with two CA-signed certs: the server saw CN=model-B for both
+    deployment A's and deployment B's handshakes."""
+    import ssl
+
+    import pytest
+
+    from litellm.llms.openai.common_utils import _resolve_ssl_config
+
+    shared = ssl.create_default_context()
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _resolve_ssl_config(ssl_verify=shared, client_cert="/tmp/does-not-matter.pem")
+
+
+def test_inline_pem_client_cert_is_hashed_in_the_client_cache_key():
+    """credential_ref_to_file supports inline PEM specifically to keep key material
+    off disk; putting the same string in a process-lifetime cache key undoes that,
+    and any diagnostic dumping cache keys would print it."""
+    from litellm.llms.openai.common_utils import BaseOpenAILLM
+
+    pem = "-----BEGIN PRIVATE KEY-----\nAAAASECRETKEYMATERIAL\n-----END PRIVATE KEY-----\n"
+    key = BaseOpenAILLM.get_openai_client_cache_key(
+        {"api_key": "sk-x", "is_async": True, "client_cert": pem}, client_type="openai"
+    )
+    assert "SECRETKEYMATERIAL" not in key, key
+    assert "BEGIN PRIVATE KEY" not in key
+
+    # Still distinguishes deployments, which is what the key is for.
+    other = BaseOpenAILLM.get_openai_client_cache_key(
+        {"api_key": "sk-x", "is_async": True, "client_cert": "/etc/other.pem"},
+        client_type="openai",
+    )
+    assert key != other

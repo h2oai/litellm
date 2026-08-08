@@ -6,6 +6,7 @@ what state the router is in. The hook runs on every request through the proxy,
 so a regression there affects every model in every deployment.
 """
 
+import json
 import os
 import sys
 from typing import Any, Dict, List, Optional
@@ -422,3 +423,102 @@ async def test_unconfigured_model_returns_none_not_a_copy():
             {"model": "plain-model", "model_info": deployment["model_info"]}, "acompletion"
         )
     assert result is None
+
+
+# --------------------------------------------------------------------------
+# Secrets must not survive into anything that gets logged, and an auth failure
+# must not be routed around.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_oauth_block_is_stripped_from_model_info():
+    """model_info IS a litellm param, so it reaches litellm_params and the router
+    metadata -- both handed to every logging callback. Measured before the fix at
+    .litellm_params.model_info.h2o_oauth.client_secret. OAuth2Config accepts a
+    literal secret, so an operator who inlines one had it logged per request."""
+    deployment = _deployment("gw-model", oauth={**OAUTH_BLOCK, "client_secret": "literal-secret"})
+    hook = OAuthAuthHook()
+    with _patch_router(_router([deployment])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            result = await hook.async_pre_call_deployment_hook(
+                {"model": "openai/gw-model", "model_info": deployment["model_info"]},
+                "acompletion",
+            )
+    assert result is not None
+    assert "h2o_oauth" not in (result.get("model_info") or {}), (
+        f"the oauth block must not survive into logged kwargs: {result.get('model_info')}"
+    )
+    # The deployment id must survive -- it is what identifies the deployment.
+    assert (result.get("model_info") or {}).get("id")
+    assert "literal-secret" not in json.dumps(result, default=str)
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_failure_is_not_retryable_or_fallbackable():
+    """At the deployment dispatch point the raise happens INSIDE the
+    per-deployment call, so router retries and fallbacks apply. Measured with an
+    IdP returning 503 and a fallback group configured: the client got a 200 from a
+    DIFFERENT vendor and the operator got no signal. litellm.AuthenticationError
+    is in litellm's non-retryable set."""
+    import litellm
+
+    deployment = _deployment("gw-model", oauth=OAUTH_BLOCK)
+    hook = OAuthAuthHook()
+
+    async def boom(self, *, force_refresh: bool = False):
+        raise OAuth2TokenError("token endpoint returned 503")
+
+    with _patch_router(_router([deployment])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", boom):
+            with pytest.raises(litellm.exceptions.AuthenticationError):
+                await hook.async_pre_call_deployment_hook(
+                    {"model": "openai/gw-model", "model_info": deployment["model_info"]},
+                    "acompletion",
+                )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_deployment_ids_restore_no_static_headers():
+    """The router honours an explicitly configured model_info.id and does not
+    reject duplicates, so "an id is unambiguous" holds only for router-generated
+    ids. Returning the first match handed one deployment's static headers -- which
+    routinely carry gateway subscription keys -- to another."""
+    a = _deployment("grp", oauth=OAUTH_BLOCK, litellm_params={"extra_headers": {"X-Which": "A"}})
+    a["model_info"]["id"] = "same-id"
+    b = _deployment("grp", litellm_params={"extra_headers": {"X-Which": "B"}})
+    b["model_info"]["id"] = "same-id"
+    hook = OAuthAuthHook()
+    with _patch_router(_router([a, b])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            result = await hook.async_pre_call_deployment_hook(
+                {"model": "openai/grp", "model_info": a["model_info"]}, "acompletion"
+            )
+    assert result is not None
+    assert "X-Which" not in result["extra_headers"], (
+        f"ambiguous id must restore nothing, got {result['extra_headers']}"
+    )
+    assert result["extra_headers"]["Authorization"] == "Bearer minted-token"
+
+
+@pytest.mark.asyncio
+async def test_the_error_names_the_group_the_operator_configured():
+    """kwargs["model"] here is the UPSTREAM model string, which appears nowhere
+    near the operator's h2o_oauth block."""
+    import litellm
+
+    deployment = _deployment("public-gw-name", oauth={"token_url": "https://idp/token"})
+    deployment["model_info"]["id"] = "dep-7"
+    hook = OAuthAuthHook()
+    with _patch_router(_router([deployment])):
+        with pytest.raises(litellm.exceptions.AuthenticationError) as excinfo:
+            await hook.async_pre_call_deployment_hook(
+                {
+                    "model": "openai/upstream-model-id",
+                    "model_info": deployment["model_info"],
+                    "metadata": {"model_group": "public-gw-name"},
+                },
+                "acompletion",
+            )
+    message = str(excinfo.value)
+    assert "public-gw-name" in message and "dep-7" in message, message

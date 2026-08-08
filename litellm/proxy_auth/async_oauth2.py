@@ -40,6 +40,7 @@ Secret values are never logged and never included in exception messages.
 
 import asyncio
 import base64
+import weakref
 import hashlib
 import json
 import os
@@ -48,7 +49,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, MutableMapping, Optional, Tuple, Union
 
 import certifi
 import httpx
@@ -331,18 +332,46 @@ class AsyncOAuth2ClientCredential:
         # (error, monotonic-ish timestamp) of the most recent mint failure, so a
         # burst of requests during an IdP outage shares one failure instead of
         # each issuing its own token request. Cleared on the next success.
-        self._recent_failure: Optional[Tuple[Exception, float]] = None
-        # Created lazily: constructing an asyncio.Lock outside a running loop is
-        # legal but binds awkwardly if the owner is built at import time.
-        self._lock: Optional[asyncio.Lock] = None
+        # (exception type, message, timestamp) -- data, not a live exception
+        # instance, so each waiter raises its own object. See get_token.
+        self._recent_failure: Optional[Tuple[type, str, float]] = None
+        # Created lazily and keyed per event loop: see _get_lock. A single lock
+        # would bind to the first loop that contended it, and this hook can run on
+        # more than one (the /responses route uses a throwaway loop per call).
+        self._locks: "MutableMapping[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
 
     # Short enough that recovery is prompt, long enough to collapse a burst.
     NEGATIVE_CACHE_SEC = 5.0
 
     def _get_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
+        """One lock PER EVENT LOOP.
+
+        A single cached asyncio.Lock is bound to whichever loop first contended
+        it. That was safe while this ran only on the proxy's loop, but the
+        /responses route dispatches async_pre_call_deployment_hook through
+        run_async_function, which spins up a BRAND NEW loop per call
+        (litellm/litellm_core_utils/asyncify.py). CPython only consults the loop
+        on the contended path, so the uncontended case silently passes and the
+        failure appears only under concurrency:
+
+            RuntimeError: <asyncio.locks.Lock ... [locked]> is bound to a
+                          different event loop
+
+        The hook's catch-all turns that into a 502, and it is not an OAuth2*Error
+        so the negative cache does not absorb it -- every /responses request for
+        that credential fails identically until the original loop contends again.
+        Keying per loop keeps the single flight where it matters: each throwaway
+        loop carries exactly one request.
+        """
+        try:
+            loop: Any = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[loop] = lock
+        return lock
 
     def _is_fresh(self, token: Optional[AccessToken]) -> bool:
         if token is None:
@@ -366,13 +395,25 @@ class AsyncOAuth2ClientCredential:
             # 30 that is 600s of queueing per burst -- a self-inflicted DoS on the
             # proxy that also hammers the IdP exactly when it is degraded.
             if not force_refresh and self._recent_failure is not None:
-                error, when = self._recent_failure
+                error_type, message, when = self._recent_failure
                 if time.time() - when < self.NEGATIVE_CACHE_SEC:
-                    raise error
+                    # A FRESH exception, never the cached instance: re-raising one
+                    # object from many coroutines appends frames to its shared
+                    # __traceback__ (measured: 15 frames after 6 raises) and lets
+                    # concurrent tasks interleave __context__, producing tracebacks
+                    # that describe the wrong call. Under load inside the window
+                    # that traceback grows without bound on a retained object.
+                    raise error_type(message)
             try:
                 self._token = await self._fetch_token()
-            except (OAuth2ConfigError, OAuth2TokenError) as e:
-                self._recent_failure = (e, time.time())
+            except OAuth2ConfigError:
+                # NOT negative-cached: a config error is fixed by the operator
+                # (setting the env var, remounting the secret), and refusing for
+                # NEGATIVE_CACHE_SEC after they fix it wastes their debugging time.
+                # There is also no IdP to protect -- no request was made.
+                raise
+            except OAuth2TokenError as e:
+                self._recent_failure = (type(e), str(e), time.time())
                 raise
             self._recent_failure = None
             return self._token

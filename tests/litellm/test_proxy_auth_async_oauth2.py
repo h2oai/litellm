@@ -626,3 +626,82 @@ async def test_invalidate_clears_the_negative_cache():
     token = await credential.get_token()
     assert token.token == "fresh"
     assert state["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_config_error_is_not_negative_cached():
+    """A config error is fixed by the operator, not by waiting. Refusing for
+    NEGATIVE_CACHE_SEC after they set the env var wastes their time, and no
+    request was made so there is no IdP to protect."""
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+    state = {"n": 0, "fail": True}
+
+    async def fetch():
+        state["n"] += 1
+        if state["fail"]:
+            raise OAuth2ConfigError("client_secret env var is unset")
+        from litellm.proxy_auth.credentials import AccessToken
+
+        return AccessToken(token="fresh", expires_on=2**31)
+
+    credential._fetch_token = fetch  # type: ignore[assignment]
+    with pytest.raises(OAuth2ConfigError):
+        await credential.get_token()
+    state["fail"] = False
+    token = await credential.get_token()  # must retry immediately
+    assert token.token == "fresh"
+    assert state["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cached_failures_raise_distinct_exception_objects():
+    """Re-raising ONE instance from many coroutines appends frames to its shared
+    __traceback__ (measured 15 frames after 6 raises) and lets concurrent tasks
+    interleave __context__, producing tracebacks that describe the wrong call."""
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+
+    async def fetch():
+        raise OAuth2TokenError("token endpoint returned 503")
+
+    credential._fetch_token = fetch  # type: ignore[assignment]
+    seen = []
+    for _ in range(3):
+        try:
+            await credential.get_token()
+        except OAuth2TokenError as e:
+            seen.append(e)
+    assert len({id(e) for e in seen}) == 3, "each waiter must raise its own exception"
+    assert all("503" in str(e) for e in seen)
+
+
+def test_the_lock_is_per_event_loop():
+    """The /responses route dispatches this hook through run_async_function, which
+    creates a NEW event loop per call. One cached asyncio.Lock binds to whichever
+    loop first CONTENDED it, and a contended refresh in another loop then raises
+    "is bound to a different event loop" -- which is not an OAuth2*Error, so the
+    negative cache cannot absorb it and every such request fails."""
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+    calls = {"n": 0}
+
+    async def slow_fetch():
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        from litellm.proxy_auth.credentials import AccessToken
+
+        return AccessToken(token=f"t{calls['n']}", expires_on=0)  # always stale
+
+    credential._fetch_token = slow_fetch  # type: ignore[assignment]
+
+    async def contend():
+        # Two concurrent waiters force the contended path, which is the only path
+        # that binds the lock to a loop.
+        return await asyncio.gather(
+            credential.get_token(), credential.get_token(), return_exceptions=True
+        )
+
+    for _ in range(2):  # two separate loops, as the /responses bridge does
+        results = asyncio.run(contend())
+        assert not any(isinstance(r, RuntimeError) for r in results), results

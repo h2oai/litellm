@@ -96,16 +96,28 @@ CONFIG_KEY = "h2o_oauth"
 
 
 def _reject(message: str) -> None:
-    """Fail the request with the clearest error the caller can see.
+    """Fail the request CLOSED, and do not let the router route around it.
 
-    Uses fastapi's HTTPException when running under the proxy so the caller gets
-    a 502 with the message; falls back to OAuth2TokenError outside the proxy
-    (unit tests, SDK use) where fastapi may not be importable.
+    This hook runs at the deployment dispatch point, i.e. INSIDE the
+    per-deployment call, so anything raised here is subject to router retries and
+    `fallbacks:`. Measured with an IdP returning 503 and a fallback group
+    configured: the client received a 200 from a DIFFERENT model group, served by
+    a different vendor's api_key, and the operator got no signal that the
+    gateway's OAuth was broken. For a feature whose entire purpose is to
+    authenticate one specific gateway, silently diverting the prompt elsewhere is
+    the wrong default -- it is the same "content goes where it should not" failure
+    as sending the bearer to a sibling deployment.
+
+    litellm.AuthenticationError is in litellm's non-retryable set, so the failure
+    surfaces to the caller instead of being routed around. It also carries the
+    right semantics: we could not authenticate to the upstream.
     """
     try:
-        from fastapi import HTTPException
+        import litellm
 
-        raise HTTPException(status_code=502, detail=message)
+        raise litellm.exceptions.AuthenticationError(
+            message=message, llm_provider="h2o_oauth", model=""
+        )
     except ImportError:
         raise OAuth2TokenError(message) from None
 
@@ -166,15 +178,51 @@ class OAuthAuthHook(CustomLogger):
         if llm_router is None:
             return {}
         try:
-            for deployment in llm_router.model_list or []:
-                info = deployment.get("model_info") or {}
-                if info.get("id") != deployment_id:
-                    continue
-                headers = (deployment.get("litellm_params") or {}).get("extra_headers")
-                return dict(headers) if isinstance(headers, dict) else {}
+            matches = [
+                deployment
+                for deployment in llm_router.model_list or []
+                if (deployment.get("model_info") or {}).get("id") == deployment_id
+            ]
         except Exception:
             return {}
-        return {}
+        if len(matches) != 1:
+            # The router honours an explicitly configured model_info.id and does
+            # NOT reject duplicates, so "unambiguous" is only true for
+            # router-generated ids. Two deployments sharing an id made this return
+            # the FIRST one's static headers to both -- and those routinely carry
+            # gateway subscription keys and tenant ids, i.e. the same
+            # cross-deployment credential bleed this dispatch point exists to
+            # prevent. Returning nothing loses a convenience; guessing leaks.
+            if len(matches) > 1:
+                verbose_logger.warning(
+                    "h2o_oauth: %d deployments share model_info.id=%r; not "
+                    "restoring static extra_headers for any of them. Give each "
+                    "deployment a distinct id (or omit it and let the router "
+                    "generate one).",
+                    len(matches),
+                    deployment_id,
+                )
+            return {}
+        headers = (matches[0].get("litellm_params") or {}).get("extra_headers")
+        return dict(headers) if isinstance(headers, dict) else {}
+
+    @staticmethod
+    def _operator_label(kwargs: Dict[str, Any]) -> str:
+        """How to name this deployment in an error the OPERATOR will read.
+
+        kwargs["model"] here is the deployment's UPSTREAM model string, because
+        this runs after routing. The operator configured `model_name:` and an
+        h2o_oauth block under it, so an error naming "openai/upstream-model-id"
+        points at a string that appears nowhere near their config -- and when
+        several deployments share an upstream model it does not say WHICH one is
+        misconfigured. The model group plus the deployment id does both.
+        """
+        metadata = kwargs.get("metadata") or kwargs.get("litellm_metadata") or {}
+        group = metadata.get("model_group") if isinstance(metadata, dict) else None
+        label = group or kwargs.get("model", "")
+        model_info = kwargs.get("model_info")
+        deployment_id = model_info.get("id") if isinstance(model_info, dict) else None
+        return f"{label} (deployment {deployment_id})" if deployment_id else str(label)
 
     async def async_pre_call_deployment_hook(
         self, kwargs: Dict[str, Any], call_type: Any
@@ -197,7 +245,11 @@ class OAuthAuthHook(CustomLogger):
             verbose_logger.debug("h2o_oauth: skipping (lookup failed): %s", e)
             return None
 
-        model = kwargs.get("model", "")
+        # The operator configured `model_name:`, so name that -- at this dispatch
+        # point kwargs["model"] is the deployment's upstream model string, which
+        # appears nowhere near their h2o_oauth block and does not identify WHICH
+        # deployment is misconfigured when several share an upstream model.
+        model = self._operator_label(kwargs)
 
         # ---- opted-in path: fail closed with an actionable message -----------
         try:
@@ -224,6 +276,13 @@ class OAuthAuthHook(CustomLogger):
         # headers the deployment configured -- they must not be dropped.
         # Lowest precedence first:
         #   deployment litellm_params.extra_headers -> request extra_headers -> auth
+        #
+        # The deployment layer is restored explicitly because litellm has ALREADY
+        # dropped it by this point whenever the request sent its own extra_headers
+        # (request kwargs replace deployment litellm_params wholesale, they are not
+        # merged). Under the proxy only: in pure Router/SDK use there is no
+        # llm_router to read back from, so that layer is still lost there -- which
+        # is litellm's own behaviour, not something this hook introduces.
         headers: Dict[str, Any] = self._static_deployment_headers(kwargs.get("model_info"))
         existing = kwargs.get("extra_headers")
         if isinstance(existing, dict):
@@ -234,6 +293,23 @@ class OAuthAuthHook(CustomLogger):
 
         modified = dict(kwargs)
         modified["extra_headers"] = headers
+
+        # Strip the config now that the token is minted. model_info IS a litellm
+        # param, so it reaches litellm_params and the router metadata, both of
+        # which are handed to every logging callback -- measured at
+        #   .litellm_params.model_info.h2o_oauth.client_secret
+        #   .litellm_params.metadata.model_info.h2o_oauth.client_secret
+        # and OAuth2Config accepts a literal secret (documented as a supported
+        # form), so an operator who inlines one has it logged on every request.
+        # This also makes the module docstring's "never leaves the proxy" claim
+        # true rather than aspirational. Nothing downstream reads the block.
+        model_info_out = modified.get("model_info")
+        if isinstance(model_info_out, dict) and CONFIG_KEY in model_info_out:
+            modified["model_info"] = {
+                key: value
+                for key, value in model_info_out.items()
+                if key != CONFIG_KEY
+            }
 
         if verbose_full:
             print(
