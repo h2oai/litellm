@@ -620,7 +620,10 @@ def test_parallel_tool_calls_config_kept_for_sonnet_5():
         config = AmazonConverseConfig()
         optional_params = config.map_openai_params(
             model="anthropic.claude-sonnet-5",
-            non_default_params={"parallel_tool_calls": False},
+            # ``tools`` is required for this path: Anthropic rejects a
+            # ``tool_choice`` sent without tools, so the config is only built for
+            # a request that actually has them.
+            non_default_params={"parallel_tool_calls": False, "tools": _TOOL_PARAM},
             optional_params={},
             drop_params=False,
         )
@@ -632,9 +635,156 @@ def test_parallel_tool_calls_config_kept_for_sonnet_5():
             messages=None,
         )
 
+        # ``tool_choice`` must carry ``type`` — the Anthropic-on-Bedrock
+        # validator returns 400 "missing field `type`" otherwise, per the
+        # customer traceback in the originating report. Mirrors the native
+        # Anthropic transform, which defaults to ``type="auto"``.
         assert data["additionalModelRequestFields"]["tool_choice"] == {
-            "disable_parallel_tool_use": True
+            "type": "auto",
+            "disable_parallel_tool_use": True,
         }
+    finally:
+        litellm.model_cost = old_cost
+        if old_env is None:
+            os.environ.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+        else:
+            os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = old_env
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Two models, not six. Every model carrying
+        # ``supports_parallel_tool_use_config`` in the cost map is Anthropic, and
+        # the code path does not branch on the model beyond that flag — so the
+        # extra four parametrizations asserted the cost map's contents rather
+        # than this code, and passed or failed together under every mutation.
+        # One bare id and one ``us.`` cross-region id keeps the prefix-handling
+        # coverage that does matter.
+        "anthropic.claude-sonnet-5",
+        "us.anthropic.claude-sonnet-5",
+    ],
+)
+def test_parallel_tool_calls_tool_choice_includes_type(model: str):
+    """tool_choice must carry ``type`` for every current Bedrock Converse model
+    that supports the parallel-tool-use config, else Bedrock 400s."""
+    old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+    old_cost = litellm.model_cost
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    litellm.model_cost = litellm.get_model_cost_map(url="")
+    try:
+        config = AmazonConverseConfig()
+        optional_params = config.map_openai_params(
+            model=model,
+            non_default_params={"parallel_tool_calls": False, "tools": _TOOL_PARAM},
+            optional_params={},
+            drop_params=False,
+        )
+        data = config._transform_request_helper(
+            model=model,
+            system_content_blocks=[],
+            optional_params=optional_params,
+            messages=None,
+        )
+        tool_choice = data["additionalModelRequestFields"]["tool_choice"]
+        assert tool_choice["type"] == "auto", f"tool_choice.type missing for {model}: {tool_choice}"
+        assert tool_choice["disable_parallel_tool_use"] is True
+    finally:
+        litellm.model_cost = old_cost
+        if old_env is None:
+            os.environ.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+        else:
+            os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = old_env
+
+
+@pytest.mark.parametrize(
+    "tool_choice, expected_type, expected_name",
+    [
+        # An explicit tool_choice must drive the parallel-config type rather than
+        # being silently overridden with "auto" (mirrors the native Anthropic
+        # transform, which sets disable_parallel_tool_use on the existing choice).
+        ("required", "any", None),
+        # A bare dict with no "type" key: the native mapper treats ANY dict as a
+        # named-tool choice, so this must too, or the forced-tool directive is
+        # lost silently while the request still succeeds.
+        ({"function": {"name": "get_current_weather"}}, "tool", "get_current_weather"),
+        # A named-function choice must forward the function name alongside
+        # type="tool" — else _apply_parallel_tool_use_config drops the native
+        # toolChoice carrying it and Bedrock gets a nameless "tool" choice.
+        (
+            {"type": "function", "function": {"name": "get_current_weather"}},
+            "tool",
+            "get_current_weather",
+        ),
+    ],
+)
+def test_parallel_tool_calls_preserves_explicit_tool_choice_type(tool_choice, expected_type, expected_name):
+    old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+    old_cost = litellm.model_cost
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    litellm.model_cost = litellm.get_model_cost_map(url="")
+    try:
+        config = AmazonConverseConfig()
+        optional_params = config.map_openai_params(
+            model="anthropic.claude-sonnet-5",
+            non_default_params={
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": False,
+                "tools": _TOOL_PARAM,
+            },
+            optional_params={},
+            drop_params=False,
+        )
+        tc = optional_params["_parallel_tool_use_config"]["tool_choice"]
+        assert tc["type"] == expected_type, f"expected {expected_type}, got {tc}"
+        assert tc["disable_parallel_tool_use"] is True
+        assert tc.get("name") == expected_name, f"name mismatch: {tc}"
+    finally:
+        litellm.model_cost = old_cost
+        if old_env is None:
+            os.environ.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+        else:
+            os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = old_env
+
+
+def test_parallel_tool_calls_named_function_survives_to_request():
+    """End-to-end: a named-function tool_choice with parallel_tool_calls=False
+    must reach Bedrock as a single, complete tool_choice — type="tool" WITH the
+    function name — in additionalModelRequestFields, and the native toolChoice
+    must be dropped so the two don't conflict."""
+    old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+    old_cost = litellm.model_cost
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    litellm.model_cost = litellm.get_model_cost_map(url="")
+    try:
+        config = AmazonConverseConfig()
+        optional_params = config.map_openai_params(
+            model="anthropic.claude-sonnet-5",
+            non_default_params={
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_current_weather"},
+                },
+                "parallel_tool_calls": False,
+                "tools": _TOOL_PARAM,
+            },
+            optional_params={},
+            drop_params=False,
+        )
+        data = config._transform_request_helper(
+            model="anthropic.claude-sonnet-5",
+            system_content_blocks=[],
+            optional_params=optional_params,
+            messages=None,
+        )
+        tool_choice = data["additionalModelRequestFields"]["tool_choice"]
+        assert tool_choice == {
+            "type": "tool",
+            "name": "get_current_weather",
+            "disable_parallel_tool_use": True,
+        }
+        # Native toolChoice dropped to avoid the conflicting-field 400.
+        assert "toolChoice" not in data.get("toolConfig", {})
     finally:
         litellm.model_cost = old_cost
         if old_env is None:
@@ -5767,3 +5917,255 @@ def test_message_level_cache_control_drops_ttl_for_unsupported_model(ttl_target)
     cache_points = _collect_cache_points(result)
     assert len(cache_points) == 1
     assert "ttl" not in cache_points[0]
+
+
+# ---------------------------------------------------------------------------
+# The parallel-tool-use config is derived from the FINAL mapped tool_choice.
+#
+# Building it from the caller's raw OpenAI value inside the param loop meant a
+# second classifier could disagree with the native mapping and then win, because
+# the config deletes the native toolChoice. Each test below pins one such
+# divergence at REQUEST level -- the level that matters, since assertions on
+# optional_params alone missed all of them.
+# ---------------------------------------------------------------------------
+
+
+def _converse_request(model: str, non_default_params: dict, drop_params: bool = False) -> dict:
+    old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+    old_cost = litellm.model_cost
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    litellm.model_cost = litellm.get_model_cost_map(url="")
+    try:
+        config = AmazonConverseConfig()
+        optional_params = config.map_openai_params(
+            model=model,
+            non_default_params=non_default_params,
+            optional_params={},
+            drop_params=drop_params,
+        )
+        return config._transform_request_helper(
+            model=model,
+            system_content_blocks=[],
+            optional_params=optional_params,
+            messages=None,
+        )
+    finally:
+        litellm.model_cost = old_cost
+        if old_env is None:
+            os.environ.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+        else:
+            os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = old_env
+
+
+def test_thinking_forced_tool_downgrade_reaches_the_request():
+    """The reasoning downgrade must not be bypassed by the parallel config.
+
+    map_openai_params downgrades forced tool use to ``auto`` when thinking is
+    enabled, because Anthropic-on-Bedrock rejects the combination. That downgrade
+    rewrites optional_params AFTER the param loop, so a config built inside the
+    loop still carried ``type="any"`` and re-sent exactly the payload the
+    downgrade exists to prevent -- a NEW 400 introduced by the parallel-config
+    feature. The existing downgrade test asserts on optional_params, which cannot
+    see this.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {
+            "tools": _TOOL_PARAM,
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+        },
+    )
+    passthrough = data.get("additionalModelRequestFields", {}).get("tool_choice")
+    assert passthrough is not None
+    assert passthrough["type"] == "auto", (
+        f"forced tool use must be downgraded with thinking enabled, got {passthrough}"
+    )
+
+
+def test_unsanitized_tool_name_is_not_forwarded_raw():
+    """Bedrock tool names must match [a-zA-Z][a-zA-Z0-9_-]*.
+
+    The tool list and the native toolChoice are both sanitized. Forwarding the
+    raw name meant forcing a tool that did not exist in toolConfig.tools -- a
+    guaranteed ValidationException for any namespaced/MCP-style tool name.
+    """
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get.current weather",
+                "description": "d",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {
+            "tools": tools,
+            "tool_choice": {"type": "function", "function": {"name": "get.current weather"}},
+            "parallel_tool_calls": False,
+        },
+    )
+    forwarded = data["additionalModelRequestFields"]["tool_choice"]
+    listed = [t["toolSpec"]["name"] for t in data["toolConfig"]["tools"]]
+    assert forwarded["type"] == "tool"
+    assert forwarded["name"] in listed, (
+        f"forced tool {forwarded['name']!r} is not in the tool list {listed}"
+    )
+    assert " " not in forwarded["name"] and "." not in forwarded["name"]
+
+
+def test_parallel_tool_calls_true_leaves_the_native_tool_choice_alone():
+    """``parallel_tool_calls: true`` is Anthropic's default -- nothing to send.
+
+    Emitting the passthrough for it moved the caller's forced-tool directive out
+    of the documented Converse field into an undocumented passthrough for no
+    benefit, on what is the OpenAI default and is sent explicitly by many SDKs.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {"tools": _TOOL_PARAM, "tool_choice": "required", "parallel_tool_calls": True},
+    )
+    assert data["toolConfig"]["toolChoice"] == {"any": {}}
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_no_config_emitted_without_tools():
+    """Anthropic rejects tool_choice sent without tools, so do not invent one."""
+    data = _converse_request("anthropic.claude-sonnet-5", {"parallel_tool_calls": False})
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_parallel_tool_calls_none_does_not_disable_parallel_use():
+    """``parallel_tool_calls: null`` is not a request to disable anything.
+
+    ``not None`` is True, so the old ``disable_parallel = not value`` turned an
+    explicit null into disable_parallel_tool_use=True.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {"tools": _TOOL_PARAM, "parallel_tool_calls": None},
+    )
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_tool_choice_without_parallel_tool_calls_is_untouched():
+    """The PR's own non-regression claim, asserted at request level.
+
+    Nothing had pinned it: a caller who never sends parallel_tool_calls must get
+    the native toolChoice exactly as before.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {"tools": _TOOL_PARAM, "tool_choice": "required"},
+    )
+    assert data["toolConfig"]["toolChoice"] == {"any": {}}
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_config_is_not_emitted_for_models_without_support():
+    """Gated by the cost-map flag: a non-Anthropic Bedrock model keeps the native
+    field and gets no passthrough."""
+    data = _converse_request(
+        "mistral.mistral-large-2402-v1:0",
+        {"tools": _TOOL_PARAM, "tool_choice": "required", "parallel_tool_calls": False},
+    )
+    assert data["toolConfig"]["toolChoice"] == {"any": {}}
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_non_list_tools_do_not_produce_a_tool_choice_without_toolconfig():
+    """The guard must read the MAPPED tools, not the caller's raw value.
+
+    A truthy non-list ``tools`` passes a non_default_params check but is skipped
+    by the mapping loop's isinstance(value, list) guard, so the request came out
+    with additionalModelRequestFields.tool_choice and no toolConfig.tools -- the
+    exact 400 the guard exists to prevent.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {
+            "tools": {"type": "function", "function": {"name": "get_weather"}},
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        },
+    )
+    passthrough = data.get("additionalModelRequestFields", {}).get("tool_choice")
+    listed = (data.get("toolConfig") or {}).get("tools") or []
+    assert not passthrough or listed, (
+        f"emitted tool_choice {passthrough} with no tools in toolConfig"
+    )
+
+
+def test_response_format_injected_tools_still_honour_parallel_tool_calls():
+    """The other direction of the same guard.
+
+    A json_schema response_format injects a synthetic tool into optional_params
+    with nothing in non_default_params, so reading the raw value silently ignored
+    parallel_tool_calls for it.
+    """
+    # The bare id, NOT "anthropic.<id>": of the 59 models carrying
+    # supports_parallel_tool_use_config this is the only one WITHOUT
+    # supports_native_structured_output, so it is the only one that takes the
+    # synthetic-tool branch instead of outputConfig. Picking any other model makes
+    # this test vacuous -- no tool is injected, `toolConfig.tools` is empty, and a
+    # conditional assertion never runs. (An earlier version of this test did
+    # exactly that and passed with the fix reverted.)
+    data = _converse_request(
+        "claude-sonnet-4-5-20250929-v1:0",
+        {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "out",
+                    "schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+                },
+            },
+            "parallel_tool_calls": False,
+        },
+    )
+    listed = [t["toolSpec"]["name"] for t in (data.get("toolConfig") or {}).get("tools") or []]
+    assert listed == ["json_tool_call"], f"expected the synthetic tool, got {listed}"
+    passthrough = data["additionalModelRequestFields"]["tool_choice"]
+    assert passthrough == {
+        "type": "tool",
+        "name": "json_tool_call",
+        "disable_parallel_tool_use": True,
+    }, passthrough
+
+
+def test_tool_choice_none_is_not_reinvented_as_auto():
+    """A caller who said "no tools" must not have ``auto`` asserted for them.
+
+    map_tool_choice_values drops "none" and returns None, which is
+    indistinguishable from "sent nothing" once inside the config builder. litellm's
+    own Anthropic transform refuses this too.
+    """
+    # drop_params=True: Bedrock raises UnsupportedParamsError for
+    # tool_choice="none" otherwise, so the dropped path -- the one where
+    # map_tool_choice_values returns None and the caller's intent is invisible
+    # downstream -- only exists here.
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {"tools": _TOOL_PARAM, "tool_choice": "none", "parallel_tool_calls": False},
+        drop_params=True,
+    )
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_a_malformed_native_tool_choice_does_not_raise():
+    """Defensive: unreachable through get_optional_params (every writer of
+    optional_params["tool_choice"] produces a well-formed block), but the builder
+    reads native["tool"].get("name") and would raise AttributeError on a string."""
+    config = AmazonConverseConfig()
+    optional_params = {"tools": _TOOL_PARAM, "tool_choice": {"tool": "get_weather"}}
+    config._map_parallel_tool_use_config(
+        non_default_params={"tools": _TOOL_PARAM, "parallel_tool_calls": False},
+        optional_params=optional_params,
+    )
+    tool_choice = optional_params["_parallel_tool_use_config"]["tool_choice"]
+    assert tool_choice["type"] == "tool"
+    assert "name" not in tool_choice  # nothing usable to forward
