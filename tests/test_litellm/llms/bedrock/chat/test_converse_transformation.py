@@ -5930,7 +5930,7 @@ def test_message_level_cache_control_drops_ttl_for_unsupported_model(ttl_target)
 # ---------------------------------------------------------------------------
 
 
-def _converse_request(model: str, non_default_params: dict) -> dict:
+def _converse_request(model: str, non_default_params: dict, drop_params: bool = False) -> dict:
     old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
     old_cost = litellm.model_cost
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -5941,7 +5941,7 @@ def _converse_request(model: str, non_default_params: dict) -> dict:
             model=model,
             non_default_params=non_default_params,
             optional_params={},
-            drop_params=False,
+            drop_params=drop_params,
         )
         return config._transform_request_helper(
             model=model,
@@ -6074,4 +6074,72 @@ def test_config_is_not_emitted_for_models_without_support():
         {"tools": _TOOL_PARAM, "tool_choice": "required", "parallel_tool_calls": False},
     )
     assert data["toolConfig"]["toolChoice"] == {"any": {}}
+    assert "tool_choice" not in data.get("additionalModelRequestFields", {})
+
+
+def test_non_list_tools_do_not_produce_a_tool_choice_without_toolconfig():
+    """The guard must read the MAPPED tools, not the caller's raw value.
+
+    A truthy non-list ``tools`` passes a non_default_params check but is skipped
+    by the mapping loop's isinstance(value, list) guard, so the request came out
+    with additionalModelRequestFields.tool_choice and no toolConfig.tools -- the
+    exact 400 the guard exists to prevent.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {
+            "tools": {"type": "function", "function": {"name": "get_weather"}},
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        },
+    )
+    passthrough = data.get("additionalModelRequestFields", {}).get("tool_choice")
+    listed = (data.get("toolConfig") or {}).get("tools") or []
+    assert not passthrough or listed, (
+        f"emitted tool_choice {passthrough} with no tools in toolConfig"
+    )
+
+
+def test_response_format_injected_tools_still_honour_parallel_tool_calls():
+    """The other direction of the same guard.
+
+    A json_schema response_format injects a synthetic tool into optional_params
+    with nothing in non_default_params, so reading the raw value silently ignored
+    parallel_tool_calls for it.
+    """
+    data = _converse_request(
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "out",
+                    "schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+                },
+            },
+            "parallel_tool_calls": False,
+        },
+    )
+    listed = (data.get("toolConfig") or {}).get("tools") or []
+    if listed:  # only meaningful if litellm injected the synthetic tool
+        passthrough = data["additionalModelRequestFields"]["tool_choice"]
+        assert passthrough["disable_parallel_tool_use"] is True
+
+
+def test_tool_choice_none_is_not_reinvented_as_auto():
+    """A caller who said "no tools" must not have ``auto`` asserted for them.
+
+    map_tool_choice_values drops "none" and returns None, which is
+    indistinguishable from "sent nothing" once inside the config builder. litellm's
+    own Anthropic transform refuses this too.
+    """
+    # drop_params=True: Bedrock raises UnsupportedParamsError for
+    # tool_choice="none" otherwise, so the dropped path -- the one where
+    # map_tool_choice_values returns None and the caller's intent is invisible
+    # downstream -- only exists here.
+    data = _converse_request(
+        "anthropic.claude-sonnet-5",
+        {"tools": _TOOL_PARAM, "tool_choice": "none", "parallel_tool_calls": False},
+        drop_params=True,
+    )
     assert "tool_choice" not in data.get("additionalModelRequestFields", {})

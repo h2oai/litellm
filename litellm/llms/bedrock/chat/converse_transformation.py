@@ -921,13 +921,8 @@ class AmazonConverseConfig(BaseConfig):
                 )
                 if _tool_choice_value is not None:
                     optional_params["tool_choice"] = _tool_choice_value
-            if param == "parallel_tool_calls":
-                # Deliberately NOT built here: see the block after the reasoning
-                # downgrade at the end of this method. Building it in this loop
-                # meant re-classifying the caller's raw tool_choice with a second
-                # classifier, which could disagree with the native mapping and
-                # then win, because the config drops the native toolChoice.
-                pass
+            # NOTE: parallel_tool_calls is handled after this loop, in
+            # _map_parallel_tool_use_config -- see its docstring for why.
             if param == "thinking":
                 optional_params["thinking"] = value
             elif param == "reasoning_effort" and isinstance(value, str):
@@ -1013,7 +1008,25 @@ class AmazonConverseConfig(BaseConfig):
             return
         # ``tool_choice`` without ``tools`` is rejected by Anthropic, so do not
         # invent one for a request that has no tools.
-        if not non_default_params.get("tools"):
+        #
+        # Read optional_params, NOT non_default_params: the tools that reach the
+        # request are the MAPPED ones, and the two disagree in both directions.
+        # A truthy non-list ``tools`` (e.g. a bare dict) passes a
+        # non_default_params check but is skipped by the mapping loop's
+        # isinstance(value, list) guard, so the payload came out with
+        # additionalModelRequestFields.tool_choice and NO toolConfig at all --
+        # the exact 400 this guard exists to prevent. In the other direction a
+        # json_schema response_format injects a synthetic tool into
+        # optional_params with nothing in non_default_params.
+        if not optional_params.get("tools"):
+            return
+
+        # A caller who said "no tools" must not have ``auto`` invented for them.
+        # map_tool_choice_values drops "none" and returns None, which is
+        # indistinguishable here from "the caller sent nothing" -- so check the
+        # raw value. litellm's own Anthropic transform does exactly this
+        # (anthropic/chat/transformation.py: `if tool_choice == "none": pass`).
+        if non_default_params.get("tool_choice") == "none":
             return
 
         native = optional_params.get("tool_choice")
@@ -1022,7 +1035,8 @@ class AmazonConverseConfig(BaseConfig):
             tool_choice["type"] = "any"
         elif isinstance(native, dict) and "tool" in native:
             tool_choice["type"] = "tool"
-            name = native["tool"].get("name")
+            named = native["tool"]
+            name = named.get("name") if isinstance(named, dict) else None
             if name:
                 # Already sanitized by map_tool_choice_values.
                 tool_choice["name"] = name
