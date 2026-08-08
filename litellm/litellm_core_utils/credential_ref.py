@@ -64,7 +64,14 @@ def resolve_credential_ref(value: Optional[str], *, field_name: str) -> str:
                 f"{field_name} references environment variable '{env_name}', "
                 f"which is unset or empty in this process"
             )
-        return resolved
+        # Strip the RESOLVED value, not just the reference. `kubectl create secret
+        # --from-literal` and .env files routinely append a newline, and a
+        # client_secret of "mysecret\n" is form-encoded verbatim -> the IdP
+        # returns 401 and the operator debugs a secret that is byte-identical to
+        # the one they configured. A path with a trailing newline likewise fails
+        # os.path.exists. PEM bodies are unaffected: stripping only removes
+        # surrounding whitespace, and the -----BEGIN/-----END markers survive.
+        return resolved.strip()
 
     if raw.startswith(FILE_PREFIX):
         path = raw[len(FILE_PREFIX) :]
@@ -82,7 +89,9 @@ def resolve_credential_ref(value: Optional[str], *, field_name: str) -> str:
             ) from None
         if not contents.strip():
             raise CredentialRefError(f"{field_name} references file '{path}', which is empty")
-        return contents
+        # See the env branch above. A file written by `echo secret > f` ends in a
+        # newline; PEM material is unaffected by stripping the edges.
+        return contents.strip()
 
     return raw
 

@@ -4996,8 +4996,17 @@ def completion(  # type: ignore
         headers = {}
     if extra_headers is not None:
         headers.update(extra_headers)
-    # Inject proxy auth headers if configured
-    if litellm.proxy_auth is not None:
+    # Inject proxy auth headers if configured.
+    #
+    # hasattr, not `is not None`: `litellm.proxy_auth` is a user-settable global
+    # that starts as None (litellm/__init__.py), but it shares its name with the
+    # litellm.proxy_auth PACKAGE -- so importing anything under that package
+    # (e.g. litellm.proxy_auth.async_oauth2) makes Python bind the submodule to
+    # the parent attribute and silently overwrite the None sentinel with a module
+    # object. The old check then treated "nobody configured this" as "configured",
+    # called get_auth_headers() on a module, and logged a warning on EVERY
+    # completion, proxy-wide.
+    if litellm.proxy_auth is not None and hasattr(litellm.proxy_auth, "get_auth_headers"):
         try:
             proxy_headers = litellm.proxy_auth.get_auth_headers()
             headers.update(proxy_headers)
@@ -5950,8 +5959,17 @@ def embedding(
         headers = {}
     if extra_headers is not None:
         headers.update(extra_headers)
-    # Inject proxy auth headers if configured
-    if litellm.proxy_auth is not None:
+    # Inject proxy auth headers if configured.
+    #
+    # hasattr, not `is not None`: `litellm.proxy_auth` is a user-settable global
+    # that starts as None (litellm/__init__.py), but it shares its name with the
+    # litellm.proxy_auth PACKAGE -- so importing anything under that package
+    # (e.g. litellm.proxy_auth.async_oauth2) makes Python bind the submodule to
+    # the parent attribute and silently overwrite the None sentinel with a module
+    # object. The old check then treated "nobody configured this" as "configured",
+    # called get_auth_headers() on a module, and logged a warning on EVERY
+    # completion, proxy-wide.
+    if litellm.proxy_auth is not None and hasattr(litellm.proxy_auth, "get_auth_headers"):
         try:
             proxy_headers = litellm.proxy_auth.get_auth_headers()
             headers.update(proxy_headers)

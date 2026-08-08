@@ -42,26 +42,96 @@ def _deployment(
     }
 
 
-def _router(deployments: List[Dict[str, Any]]) -> MagicMock:
-    router = MagicMock()
-    router.model_list = deployments
-    return router
+# The hook runs at async_pre_call_deployment_hook, i.e. AFTER the router has
+# picked a deployment, so there is no router to look up: litellm hands it the
+# selected deployment's model_info directly. These helpers therefore SIMULATE the
+# selection -- `_router(...)` records the group and `_run` resolves the entry the
+# router would have handed over -- rather than mocking litellm.proxy.proxy_server.
+_GROUP: List[Dict[str, Any]] = []
 
 
-def _patch_router(router: Any):
-    module = MagicMock()
-    module.llm_router = router
-    return patch.dict(sys.modules, {"litellm.proxy.proxy_server": module})
+def _router(deployments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return deployments
+
+
+class _patch_router:
+    """Record the deployment group, and expose it as the proxy router.
+
+    The router is still needed -- not to CHOOSE a deployment (litellm has already
+    done that by this dispatch point) but to read the chosen deployment's static
+    extra_headers back, which litellm drops when the request supplies its own. The
+    lookup is by model_info["id"], so it cannot resolve to a sibling.
+    """
+
+    def __init__(self, deployments: Any):
+        self._deployments = deployments if isinstance(deployments, list) else []
+        self._patch = None
+
+    def __enter__(self):
+        _GROUP.clear()
+        if self._deployments:
+            _GROUP.extend(self._deployments)
+        module = MagicMock()
+        router = MagicMock()
+        router.model_list = list(self._deployments)
+        module.llm_router = router
+        self._patch = patch.dict(sys.modules, {"litellm.proxy.proxy_server": module})
+        self._patch.start()
+        return self
+
+    def __exit__(self, *exc):
+        _GROUP.clear()
+        if self._patch is not None:
+            self._patch.stop()
+        return False
 
 
 def _fake_token(token: str = "minted-token") -> AccessToken:
     return AccessToken(token=token, expires_on=2**31)
 
 
-async def _run(hook: OAuthAuthHook, data: Dict[str, Any]) -> Dict[str, Any]:
-    return await hook.async_pre_call_hook(
-        user_api_key_dict=MagicMock(), cache=MagicMock(), data=data, call_type="completion"
-    )
+def _selected(model: str) -> Optional[Dict[str, Any]]:
+    for deployment in _GROUP:
+        if deployment.get("model_name") == model:
+            return deployment
+    return None
+
+
+async def _run(
+    hook: OAuthAuthHook,
+    data: Dict[str, Any],
+    deployment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Drive the deployment hook the way litellm drives it.
+
+    kwargs at that point are the request merged with the SELECTED deployment's
+    litellm_params, plus its model_info. A None return means "unchanged", so the
+    original kwargs are handed back for the caller's assertions.
+    """
+    if deployment is None:
+        deployment = _selected(data.get("model", ""))
+    kwargs: Dict[str, Any] = dict(data)
+    injected = set()
+    if deployment is not None:
+        kwargs["model_info"] = deployment.get("model_info")
+        injected.add("model_info")
+        for key, value in (deployment.get("litellm_params") or {}).items():
+            if key == "model" or key in kwargs:
+                continue
+            kwargs[key] = value
+            injected.add(key)
+    before = dict(kwargs)
+    result = await hook.async_pre_call_deployment_hook(kwargs, "acompletion")
+    out = dict(kwargs if result is None else result)
+    # Report the HOOK's effect only. The keys above are what litellm itself merges
+    # in before this dispatch point, not something the hook did, so leaving them
+    # in would make every "untouched" assertion fail for the wrong reason. A key
+    # the hook actually changed (e.g. extra_headers seeded from the deployment)
+    # keeps its new value and stays visible.
+    for key in injected:
+        if key in out and out[key] == before.get(key):
+            del out[key]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -264,3 +334,91 @@ async def test_one_broken_oauth_model_does_not_affect_a_healthy_plain_model():
         assert out == {"model": "plain-model"}
         with pytest.raises(Exception):
             await _run(hook, {"model": "broken-gw"})
+
+
+# --------------------------------------------------------------------------
+# The token must reach ONLY the deployment whose config minted it.
+#
+# The hook used to run at async_pre_call_hook, before the router chose a
+# deployment, so it read the FIRST deployment matching the model GROUP name and
+# wrote the header into a request the router could send anywhere in that group.
+# Measured with two loopback servers and simple-shuffle: gateway A's live bearer
+# went to deployment B, which had no OAuth config, a different vendor and its own
+# api_key -- credential exfiltration to a third party, plus B broke because the
+# injected Authorization overrode its key.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sibling_deployment_without_oauth_gets_no_token():
+    """The mixed-group case that leaked. Same model_name, two deployments."""
+    with_oauth = _deployment("grp", oauth=OAUTH_BLOCK)
+    with_oauth["model_info"]["id"] = "A"
+    without = _deployment("grp")
+    without["model_info"]["id"] = "B"
+    hook = OAuthAuthHook()
+    data = {"model": "grp", "messages": [{"role": "user", "content": "hi"}]}
+
+    with _patch_router(_router([with_oauth, without])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            # The router selected B -- the one with no OAuth config.
+            out = await _run(hook, data, deployment=without)
+    assert "extra_headers" not in out, (
+        f"a deployment with no h2o_oauth must receive no token, got {out}"
+    )
+
+    with _patch_router(_router([with_oauth, without])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            out = await _run(hook, data, deployment=with_oauth)
+    assert out["extra_headers"]["Authorization"] == "Bearer minted-token"
+
+
+@pytest.mark.asyncio
+async def test_two_gateways_in_one_group_each_get_their_own_token():
+    """Neither deployment may be served the other's credential."""
+    a = _deployment("grp", oauth={**OAUTH_BLOCK, "client_id": "client-a"})
+    a["model_info"]["id"] = "A"
+    b = _deployment("grp", oauth={**OAUTH_BLOCK, "client_id": "client-b"})
+    b["model_info"]["id"] = "B"
+    hook = OAuthAuthHook()
+    seen = {}
+
+    async def fake_get_token(self, *, force_refresh: bool = False):
+        seen["client_id"] = self.config.client_id
+        return _fake_token(f"token-for-{self.config.client_id}")
+
+    data = {"model": "grp", "messages": [{"role": "user", "content": "hi"}]}
+    for deployment, expected in ((a, "client-a"), (b, "client-b")):
+        with _patch_router(_router([a, b])):
+            with patch.object(AsyncOAuth2ClientCredential, "get_token", fake_get_token):
+                out = await _run(hook, data, deployment=deployment)
+        assert seen["client_id"] == expected
+        assert out["extra_headers"]["Authorization"] == f"Bearer token-for-{expected}"
+
+
+@pytest.mark.asyncio
+async def test_the_hook_does_not_mutate_the_caller_kwargs():
+    """litellm chains each callback's returned kwargs, so in-place mutation as
+    well as returning a copy would make the chaining order matter."""
+    deployment = _deployment("gw-model", oauth=OAUTH_BLOCK)
+    hook = OAuthAuthHook()
+    kwargs = {"model": "gw-model", "model_info": deployment["model_info"]}
+    snapshot = dict(kwargs)
+    with _patch_router(_router([deployment])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            result = await hook.async_pre_call_deployment_hook(kwargs, "acompletion")
+    assert result is not None and "extra_headers" in result
+    assert kwargs == snapshot, "the input kwargs must be left alone"
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_model_returns_none_not_a_copy():
+    """None is litellm's "unchanged" contract; returning a copy for every request
+    would make the hook look like it modified something."""
+    deployment = _deployment("plain-model")
+    hook = OAuthAuthHook()
+    with _patch_router(_router([deployment])):
+        result = await hook.async_pre_call_deployment_hook(
+            {"model": "plain-model", "model_info": deployment["model_info"]}, "acompletion"
+        )
+    assert result is None

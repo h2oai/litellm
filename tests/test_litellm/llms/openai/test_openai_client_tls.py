@@ -332,3 +332,25 @@ async def test_completion_fails_without_client_cert(mtls_llm_endpoint):
             num_retries=0,
         )
     assert "connection" in str(exc.value).lower() or "ssl" in str(exc.value).lower()
+
+
+def test_tls_params_never_reach_the_upstream_request_body():
+    """ssl_verify / client_cert / client_key are TRANSPORT settings.
+
+    Anything absent from all_litellm_params is treated as a provider param,
+    swept into extra_body and flattened into the JSON body. Measured against a
+    loopback server before the fix, the body carried
+
+        {"client_cert": "...", "client_key": "...", "ssl_verify": "..."}
+
+    which discloses container filesystem layout, 400s on strict
+    OpenAI-compatible servers, and -- because credential refs may hold inline PEM
+    -- can transmit a private key to the provider.
+    """
+    from litellm.types.utils import all_litellm_params
+
+    for param in ("ssl_verify", "client_cert", "client_key"):
+        assert param in all_litellm_params, (
+            f"{param} must be a litellm param, else it is sent to the provider "
+            f"in the request body"
+        )

@@ -328,9 +328,16 @@ class AsyncOAuth2ClientCredential:
     def __init__(self, config: OAuth2Config):
         self.config = config
         self._token: Optional[AccessToken] = None
+        # (error, monotonic-ish timestamp) of the most recent mint failure, so a
+        # burst of requests during an IdP outage shares one failure instead of
+        # each issuing its own token request. Cleared on the next success.
+        self._recent_failure: Optional[Tuple[Exception, float]] = None
         # Created lazily: constructing an asyncio.Lock outside a running loop is
         # legal but binds awkwardly if the owner is built at import time.
         self._lock: Optional[asyncio.Lock] = None
+
+    # Short enough that recovery is prompt, long enough to collapse a burst.
+    NEGATIVE_CACHE_SEC = 5.0
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -350,7 +357,24 @@ class AsyncOAuth2ClientCredential:
             # Re-check: another coroutine may have refreshed while we waited.
             if not force_refresh and self._is_fresh(self._token):
                 return self._token  # type: ignore[return-value]
-            self._token = await self._fetch_token()
+            # Negative cache. Without it the single-flight collapses only on
+            # SUCCESS: on failure self._token stays stale, so every waiter takes
+            # the lock in turn and issues its own request. Measured against a
+            # transport that sleeps 0.3s then 503s: 20 concurrent requests
+            # produced 20 token requests over 6.0s strictly serialised, versus 1
+            # request in 0.30s on the success path. With timeout_sec defaulting to
+            # 30 that is 600s of queueing per burst -- a self-inflicted DoS on the
+            # proxy that also hammers the IdP exactly when it is degraded.
+            if not force_refresh and self._recent_failure is not None:
+                error, when = self._recent_failure
+                if time.time() - when < self.NEGATIVE_CACHE_SEC:
+                    raise error
+            try:
+                self._token = await self._fetch_token()
+            except (OAuth2ConfigError, OAuth2TokenError) as e:
+                self._recent_failure = (e, time.time())
+                raise
+            self._recent_failure = None
             return self._token
 
     def invalidate(self) -> None:
@@ -360,6 +384,10 @@ class AsyncOAuth2ClientCredential:
         (clock skew, server-side revocation).
         """
         self._token = None
+        # Also clear the negative cache: an explicit invalidate is a request to
+        # try again, and leaving a recent failure cached would refuse for up to
+        # NEGATIVE_CACHE_SEC.
+        self._recent_failure = None
 
     def _client_assertion(self) -> str:
         import jwt  # PyJWT -- imported lazily so this module loads without it

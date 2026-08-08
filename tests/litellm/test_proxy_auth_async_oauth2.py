@@ -127,9 +127,59 @@ def test_config_defaults():
 def test_fingerprint_tracks_config_and_not_resolved_secret():
     a = OAuth2Config.from_dict({**BASE_CONFIG, "client_secret": "os.environ/TOKEN_A"})
     b = OAuth2Config.from_dict({**BASE_CONFIG, "client_secret": "os.environ/TOKEN_A"})
-    c = OAuth2Config.from_dict({**BASE_CONFIG, "scope": "extra.scope"})
     assert a.fingerprint() == b.fingerprint()
-    assert a.fingerprint() != c.fingerprint()
+
+
+# The fingerprint IS the token-cache key, so any dimension missing from it means
+# one deployment can be served another deployment's token. The previous version of
+# this test compared a baseline carrying client_secret="os.environ/TOKEN_A" against
+# a variant carrying the BASE_CONFIG secret plus a different scope -- two changes
+# at once -- so the inequality held even with scope removed from the payload.
+# Measured: with that test in place, deleting token_url, scope, audience,
+# client_secret_ref, client_private_key_ref, auth_style, ca_bundle, mtls_cert,
+# mtls_key, extra_token_params or insecure_skip_tls_verify from the payload left
+# all 80 tests passing. Only client_id was genuinely pinned.
+#
+# One field at a time against one baseline, covering every key in the payload.
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("token_url", "https://other-idp.example.com/token"),
+        ("client_id", "other-client"),
+        ("auth_style", "client_secret_basic"),
+        ("client_secret", "os.environ/OTHER_SECRET"),
+        ("scope", "extra.scope"),
+        ("audience", "https://other-audience"),
+        ("ca_bundle", "/etc/ssl/other-ca.pem"),
+        ("mtls_cert", "/tmp/other-combined.pem"),
+        ("insecure_skip_tls_verify", True),
+        ("extra_token_params", {"resource": "urn:other"}),
+    ],
+)
+def test_every_fingerprint_dimension_changes_the_identity(field, value):
+    baseline = OAuth2Config.from_dict(BASE_CONFIG)
+    variant = OAuth2Config.from_dict({**BASE_CONFIG, field: value})
+    assert baseline.fingerprint() != variant.fingerprint(), (
+        f"{field} is not part of the token-cache key: two deployments differing "
+        f"only in {field} would share one cached token"
+    )
+
+
+def test_private_key_and_mtls_key_are_part_of_the_identity():
+    """These two need a companion field to be a legal config, so they cannot go
+    through the one-field-at-a-time table above."""
+    jwt_base = {
+        "token_url": BASE_CONFIG["token_url"],
+        "client_id": BASE_CONFIG["client_id"],
+        "auth_style": "private_key_jwt",
+        "client_private_key": "file:///tmp/a.pem",
+    }
+    other_key = OAuth2Config.from_dict({**jwt_base, "client_private_key": "file:///tmp/b.pem"})
+    assert OAuth2Config.from_dict(jwt_base).fingerprint() != other_key.fingerprint()
+
+    mtls_base = {**BASE_CONFIG, "mtls_cert": "/tmp/c.pem", "mtls_key": "/tmp/k1.pem"}
+    other_mtls = OAuth2Config.from_dict({**mtls_base, "mtls_key": "/tmp/k2.pem"})
+    assert OAuth2Config.from_dict(mtls_base).fingerprint() != other_mtls.fingerprint()
 
 
 # --------------------------------------------------------------------------
@@ -505,3 +555,74 @@ def test_auth_header_uses_configured_name_and_scheme():
     )
     name, value = cred.auth_header(AccessToken(token="abc", expires_on=0))
     assert (name, value) == ("X-Gateway-Token", "abc")
+
+
+# --------------------------------------------------------------------------
+# The single flight must collapse FAILURE too.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_share_one_failure():
+    """Without a negative cache the lock serialises an outage instead of
+    collapsing it.
+
+    The re-check inside the lock only returns early when a FRESH token exists, so
+    on failure every waiter took the lock in turn and issued its own request.
+    Measured against a transport that slept then 503'd: 20 concurrent requests
+    produced 20 token requests over 6.0s strictly serialised, versus 1 request in
+    0.30s on the success path. With timeout_sec defaulting to 30 that is 600s of
+    queueing per burst -- a self-inflicted DoS that also hammers the IdP exactly
+    when it is degraded.
+    """
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+    attempts = {"n": 0}
+
+    async def failing_fetch():
+        attempts["n"] += 1
+        await asyncio.sleep(0.05)
+        raise OAuth2TokenError("token endpoint returned 503")
+
+    credential._fetch_token = failing_fetch  # type: ignore[assignment]
+
+    results = await asyncio.gather(
+        *[credential.get_token() for _ in range(20)], return_exceptions=True
+    )
+    assert all(isinstance(r, OAuth2TokenError) for r in results)
+    assert attempts["n"] == 1, (
+        f"20 concurrent requests during an outage must share one attempt, made {attempts['n']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalidate_clears_the_negative_cache():
+    """invalidate() is an explicit request to try again, so a cached failure must
+    not keep refusing for NEGATIVE_CACHE_SEC."""
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+    state = {"fail": True, "n": 0}
+
+    from litellm.proxy_auth.credentials import AccessToken
+
+    async def flaky_fetch():
+        state["n"] += 1
+        if state["fail"]:
+            raise OAuth2TokenError("boom")
+        return AccessToken(token="fresh", expires_on=2**31)
+
+    credential._fetch_token = flaky_fetch  # type: ignore[assignment]
+
+    with pytest.raises(OAuth2TokenError):
+        await credential.get_token()
+    state["fail"] = False
+
+    # Still inside the negative-cache window: refused without a new attempt.
+    with pytest.raises(OAuth2TokenError):
+        await credential.get_token()
+    assert state["n"] == 1
+
+    credential.invalidate()
+    token = await credential.get_token()
+    assert token.token == "fresh"
+    assert state["n"] == 2
