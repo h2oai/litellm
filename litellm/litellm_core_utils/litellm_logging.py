@@ -925,6 +925,11 @@ class Logging(LiteLLMLoggingBaseClass):
         )
 
     def pre_call(self, input, api_key, model=None, additional_args={}):
+        # Mask BEFORE the locals() capture below: litellm.error_logs["PRE_CALL"] =
+        # locals() is the first statement, so the raw dict (bearer included) would
+        # be retained in a process-global for the process lifetime and dumped by
+        # any diagnostic or heap capture.
+        additional_args = _mask_extra_headers_in_additional_args(additional_args)
         # Log the exact input to the LLM API
         litellm.error_logs["PRE_CALL"] = locals()
         try:
@@ -1135,6 +1140,8 @@ class Logging(LiteLLMLoggingBaseClass):
         return _get_masked_values(headers, ignore_sensitive_values=ignore_sensitive_headers)
 
     def post_call(self, original_response, input=None, api_key=None, additional_args={}):
+        # Masked before the locals() capture below -- see pre_call.
+        additional_args = _mask_extra_headers_in_additional_args(additional_args)
         # Log the exact result from the LLM API, for streaming - log the type of response received
         litellm.error_logs["POST_CALL"] = locals()
         if isinstance(original_response, dict):
@@ -3335,11 +3342,16 @@ class Logging(LiteLLMLoggingBaseClass):
 def _mask_extra_headers_in_additional_args(additional_args: Any) -> Any:
     """Mask `complete_input_dict["extra_headers"]` before it is logged.
 
-    litellm's convention is that credentials live in headers, not in the request
-    BODY -- which is why `additional_args["headers"]` is masked here and
-    `complete_input_dict` is not. `extra_headers` breaks that convention: it is a
-    provider param, so it travels inside the body dict, and the OpenAI SDK only
-    lifts it out to real HTTP headers later. The wire is fine; the LOG is not.
+    Two sinks, both measured with a real request and a capture CustomLogger:
+
+      * `complete_input_dict["extra_headers"]` -- `extra_headers` is a PROVIDER
+        param, so it travels inside the body dict and the OpenAI SDK lifts it to
+        real HTTP headers only later.
+      * `additional_args["headers"]` -- the streaming path (openai.py) passes the
+        merged headers straight through, bearer included.
+
+    Note `_get_masked_headers` exists but is only used to build the debug curl
+    string; nothing masked either of these on the callback path.
 
     Measured with a real acompletion and a capture CustomLogger, a bearer minted
     by the h2o OAuth hook appeared at
@@ -3359,18 +3371,70 @@ def _mask_extra_headers_in_additional_args(additional_args: Any) -> Any:
     """
     if not isinstance(additional_args, dict):
         return additional_args
+
     complete_input_dict = additional_args.get("complete_input_dict")
-    if not isinstance(complete_input_dict, dict):
+    body_headers = (
+        complete_input_dict.get("extra_headers")
+        if isinstance(complete_input_dict, dict)
+        else None
+    )
+    request_headers = additional_args.get("headers")
+    body_needs_mask = isinstance(body_headers, dict) and bool(body_headers)
+    headers_need_mask = isinstance(request_headers, dict) and bool(request_headers)
+    if not body_needs_mask and not headers_need_mask:
         return additional_args
-    extra_headers = complete_input_dict.get("extra_headers")
-    if not isinstance(extra_headers, dict) or not extra_headers:
-        return additional_args
+
     masked = dict(additional_args)
-    masked["complete_input_dict"] = {
-        **complete_input_dict,
-        "extra_headers": _get_masked_values(extra_headers, mask_all_values=True),
-    }
+    if body_needs_mask:
+        masked["complete_input_dict"] = {
+            **complete_input_dict,
+            "extra_headers": _mask_credential_headers(body_headers),
+        }
+    if headers_need_mask:
+        masked["headers"] = _mask_credential_headers(request_headers)
     return masked
+
+
+# Header names that never carry a credential. Everything NOT in here is masked,
+# rather than masking only names matching authorization/token/key/secret: an auth
+# header name is operator-configurable (h2o_oauth.header_name), so a gateway using
+# "X-Gateway-Auth" would sail straight through a keyword list. Deny-by-default with
+# a small allowlist keeps diagnostics readable -- litellm's own health-check test
+# asserts Content-Type stays legible -- without needing to predict the name.
+_NON_CREDENTIAL_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-request-id",
+        "x-stainless-arch",
+        "x-stainless-async",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout",
+    }
+)
+
+
+def _mask_credential_headers(headers: dict) -> dict:
+    """Mask every header value except the known-innocuous ones."""
+    innocuous = {
+        key: value
+        for key, value in headers.items()
+        if str(key).lower() in _NON_CREDENTIAL_HEADERS
+    }
+    sensitive = {key: value for key, value in headers.items() if key not in innocuous}
+    return {**_get_masked_values(sensitive, mask_all_values=True), **innocuous}
 
 
 def _get_masked_values(

@@ -40,7 +40,6 @@ Secret values are never logged and never included in exception messages.
 
 import asyncio
 import base64
-import weakref
 import hashlib
 import json
 import os
@@ -49,7 +48,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, MutableMapping, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Set, Tuple, Union
 
 import certifi
 import httpx
@@ -154,6 +153,11 @@ def _optional_positive_number(raw: Dict[str, Any], key: str, default: Union[int,
     return value
 
 
+# token_urls already warned about insecure_skip_tls_verify, so the warning is
+# emitted once per endpoint instead of once per request.
+_INSECURE_WARNED: Set[str] = set()
+
+
 @dataclass
 class OAuth2Config:
     """Validated OAuth2 client-credentials configuration for one deployment."""
@@ -244,10 +248,27 @@ class OAuth2Config:
         header_scheme = "Bearer" if raw_header_scheme is None else str(raw_header_scheme).strip()
 
         insecure = bool(raw.get("insecure_skip_tls_verify", False))
-        if insecure:
+        if insecure and mtls_cert:
+            # The CERT_NONE / check_hostname=False context still gets
+            # load_cert_chain, so the client certificate is offered to whoever
+            # answers the token URL -- i.e. this deployment's mTLS identity is
+            # handed to any MITM. Refuse rather than warn.
+            raise OAuth2ConfigError(
+                "h2o_oauth.mtls_cert cannot be combined with "
+                "insecure_skip_tls_verify: the client certificate would be "
+                "presented over an unverified connection, handing this "
+                "deployment's mTLS identity to whoever answers the token URL."
+            )
+        if insecure and token_url not in _INSECURE_WARNED:
+            # Once per token_url, not once per request: from_dict runs on EVERY
+            # request, so the original warning emitted a line per completion --
+            # which guarantees it is filtered out as noise, defeating its purpose.
+            _INSECURE_WARNED.add(token_url)
             verbose_logger.warning(
-                "h2o_oauth: insecure_skip_tls_verify=true -- TLS verification of the token "
-                "endpoint is DISABLED. Use only for bring-up, never in production."
+                "h2o_oauth: insecure_skip_tls_verify=true for %s -- TLS "
+                "verification of the token endpoint is DISABLED. Use only for "
+                "bring-up, never in production.",
+                token_url,
             )
 
         return cls(
@@ -338,7 +359,10 @@ class AsyncOAuth2ClientCredential:
         # Created lazily and keyed per event loop: see _get_lock. A single lock
         # would bind to the first loop that contended it, and this hook can run on
         # more than one (the /responses route uses a throwaway loop per call).
-        self._locks: "MutableMapping[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
+        # id(loop) -> (lock, loop). The loop is held so the entry can be pruned
+        # when it closes, and so a recycled id() cannot hand a new loop a lock
+        # bound to a dead one. See _get_lock.
+        self._locks: Dict[int, Tuple[asyncio.Lock, Any]] = {}
 
     # Short enough that recovery is prompt, long enough to collapse a burst.
     NEGATIVE_CACHE_SEC = 5.0
@@ -364,14 +388,32 @@ class AsyncOAuth2ClientCredential:
         loop carries exactly one request.
         """
         try:
-            loop: Any = asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = None
-        lock = self._locks.get(loop)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[loop] = lock
-        return lock
+            # No running loop: nothing can contend, so an unshared lock is correct
+            # and there is nothing to cache. (Keying a WeakKeyDictionary on None
+            # raised TypeError -- weak refs to NoneType are not allowed -- which
+            # made this case worse than leaving it unhandled.)
+            return asyncio.Lock()
+
+        # Keyed by id(loop) and pruned on insert. A WeakKeyDictionary does NOT
+        # work: asyncio.Lock caches self._loop on first contention, so the VALUE
+        # strongly references the KEY and the entry is never collected. Measured
+        # over 25 /responses-style calls through run_async_function: 25 retained
+        # entries, each pinning a CLOSED event loop for the process lifetime -- on
+        # precisely the path the per-loop lock was added to fix.
+        key = id(loop)
+        lock = self._locks.get(key)
+        if lock is not None and not lock[1].is_closed():
+            return lock[0]
+        self._locks = {
+            loop_id: entry
+            for loop_id, entry in self._locks.items()
+            if loop_id != key and not entry[1].is_closed()
+        }
+        fresh = asyncio.Lock()
+        self._locks[key] = (fresh, loop)
+        return fresh
 
     def _is_fresh(self, token: Optional[AccessToken]) -> bool:
         if token is None:

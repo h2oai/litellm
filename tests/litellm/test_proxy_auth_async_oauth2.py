@@ -705,3 +705,33 @@ def test_the_lock_is_per_event_loop():
     for _ in range(2):  # two separate loops, as the /responses bridge does
         results = asyncio.run(contend())
         assert not any(isinstance(r, RuntimeError) for r in results), results
+
+
+def test_the_lock_cache_does_not_grow_per_event_loop():
+    """A WeakKeyDictionary keyed on the loop never collects: asyncio.Lock caches
+    self._loop on first contention, so the VALUE strongly references the KEY.
+    Measured over 25 /responses-style calls: 25 retained entries, each pinning a
+    CLOSED event loop for the process lifetime -- on exactly the path the per-loop
+    lock was added to fix."""
+    from litellm.proxy_auth.credentials import AccessToken
+
+    config = OAuth2Config.from_dict(BASE_CONFIG)
+    credential = AsyncOAuth2ClientCredential(config)
+
+    async def fetch():
+        await asyncio.sleep(0.01)
+        return AccessToken(token="t", expires_on=0)  # always stale -> always refetch
+
+    credential._fetch_token = fetch  # type: ignore[assignment]
+
+    async def contend():
+        return await asyncio.gather(
+            credential.get_token(), credential.get_token(), return_exceptions=True
+        )
+
+    for _ in range(25):
+        results = asyncio.run(contend())
+        assert not any(isinstance(r, RuntimeError) for r in results), results
+    assert len(credential._locks) == 1, (
+        f"one entry per closed loop is a leak; got {len(credential._locks)}"
+    )

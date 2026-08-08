@@ -522,3 +522,36 @@ async def test_the_error_names_the_group_the_operator_configured():
             )
     message = str(excinfo.value)
     assert "public-gw-name" in message and "dep-7" in message, message
+
+
+@pytest.mark.asyncio
+async def test_the_secret_is_stripped_even_when_metadata_aliases_model_info():
+    """The router stores ONE model_info object in two places.
+
+    Router._update_kwargs_with_deployment takes a single per-request
+    deployment["model_info"].copy() and puts that same object in BOTH
+    kwargs["model_info"] and metadata["model_info"]. Replacing only our key left
+    the secret reachable through metadata (and through the caching handler's
+    captured request_kwargs) -- measured on streaming and non-streaming. Popping in
+    place is what closes every alias, so this test shares the object exactly as the
+    router does.
+    """
+    deployment = _deployment("gw-model", oauth={**OAUTH_BLOCK, "client_secret": "literal-secret"})
+    shared_model_info = deployment["model_info"]
+    hook = OAuthAuthHook()
+    kwargs = {
+        "model": "openai/gw-model",
+        "model_info": shared_model_info,
+        "metadata": {"model_info": shared_model_info, "model_group": "gw-model"},
+    }
+    with _patch_router(_router([deployment])):
+        with patch.object(AsyncOAuth2ClientCredential, "get_token", return_value=_fake_token()):
+            result = await hook.async_pre_call_deployment_hook(kwargs, "acompletion")
+    assert result is not None
+    assert "literal-secret" not in json.dumps(result, default=str)
+    # The alias must be clean too, not just our copy.
+    assert "h2o_oauth" not in result["metadata"]["model_info"]
+    assert "h2o_oauth" not in shared_model_info
+    # Still usable for the next request: the router's own model_list entry holds a
+    # different dict, so this only clears the per-request copy.
+    assert shared_model_info.get("id")

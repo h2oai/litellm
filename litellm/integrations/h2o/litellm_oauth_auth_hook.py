@@ -108,10 +108,31 @@ def _reject(message: str) -> None:
     the wrong default -- it is the same "content goes where it should not" failure
     as sending the bearer to a sibling deployment.
 
-    litellm.AuthenticationError is in litellm's non-retryable set, so the failure
-    surfaces to the caller instead of being routed around. It also carries the
-    right semantics: we could not authenticate to the upstream.
+    litellm.AuthenticationError carries the right semantics -- we could not
+    authenticate to the upstream -- and it DOES fail closed for a model group with
+    a single deployment (measured, with and without num_retries).
+
+    BUT IT IS NOT A GUARANTEE, and this is worth stating precisely because it is
+    tempting to assume otherwise. Measured against a 503 IdP:
+
+        lone oauth deployment, no retries        -> failed closed
+        lone oauth deployment, num_retries=3     -> failed closed
+        oauth + a sibling in the same group      -> FAIL-OPEN, 200 served
+        oauth + `fallbacks:` to another group    -> FAIL-OPEN, 200 served
+
+    router.py's retry gate only re-raises an AuthenticationError when
+    `_num_all_deployments <= 1`, and `fallbacks:` has no exception-type gate at
+    all -- AuthenticationError, NotFoundError and BadRequestError all route around
+    it. So with siblings or fallbacks configured, a broken gateway means the prompt
+    is served by ANOTHER deployment, possibly another vendor. Genuinely preventing
+    that needs a router-level change (honouring disable_fallbacks for this error
+    class), which is out of scope here.
+
+    What IS fixed unconditionally: the operator now gets a loud signal instead of
+    silence, so a gateway whose OAuth is broken is visible even when the request
+    itself succeeded elsewhere.
     """
+    verbose_logger.error("h2o_oauth: %s", message)
     try:
         import litellm
 
@@ -301,15 +322,21 @@ class OAuthAuthHook(CustomLogger):
         #   .litellm_params.metadata.model_info.h2o_oauth.client_secret
         # and OAuth2Config accepts a literal secret (documented as a supported
         # form), so an operator who inlines one has it logged on every request.
-        # This also makes the module docstring's "never leaves the proxy" claim
-        # true rather than aspirational. Nothing downstream reads the block.
-        model_info_out = modified.get("model_info")
-        if isinstance(model_info_out, dict) and CONFIG_KEY in model_info_out:
-            modified["model_info"] = {
-                key: value
-                for key, value in model_info_out.items()
-                if key != CONFIG_KEY
-            }
+        #
+        # POPPED IN PLACE, not copy-and-filter. Router._update_kwargs_with_deployment
+        # takes ONE per-request `deployment["model_info"].copy()` and stores that
+        # same object twice -- as kwargs["model_info"] AND as
+        # metadata["model_info"] -- so replacing only our key left the secret
+        # reachable through metadata, and through the caching handler's captured
+        # request_kwargs, both measured. Mutating the object other holders point at
+        # is the only thing that closes every alias.
+        #
+        # Safe across requests: the object is a per-request copy, so the router's
+        # own model_list entry still carries the block and the next request still
+        # mints. Nothing downstream reads it.
+        model_info_in = kwargs.get("model_info")
+        if isinstance(model_info_in, dict):
+            model_info_in.pop(CONFIG_KEY, None)
 
         if verbose_full:
             print(

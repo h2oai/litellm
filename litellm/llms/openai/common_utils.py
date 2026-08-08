@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from aiohttp import ClientSession
 
 import litellm
+from litellm._logging import verbose_logger
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
     _DEFAULT_TTL_FOR_HTTPX_CLIENTS,
@@ -97,6 +98,37 @@ def _resolve_ssl_config(
         with credential_ref_to_file(client_cert, field_name="client_cert") as cert_path:
             context.load_cert_chain(cert_path)
     return context
+
+
+def _warn_global_session_defeats_tls(
+    which: str,
+    ssl_verify: Optional[Union[bool, str, "ssl.SSLContext"]],
+    client_cert: Optional[Union[str, Tuple[str, str]]],
+) -> None:
+    """Say so when a global session silently discards per-deployment TLS config.
+
+    litellm.client_session / aclient_session short-circuit client construction
+    BEFORE _resolve_ssl_config runs, so a deployment configured with client_cert
+    presents no certificate at all -- while client_cert still participates in the
+    client cache key, so the cache looks correctly partitioned. Measured: the
+    global session wins and mTLS is silently absent.
+
+    Silently dropping an mTLS identity is the one failure mode this feature must
+    not have, and the operator has no way to notice: the handshake succeeds,
+    because the gateway is the one that decides whether to require a cert.
+    """
+    if client_cert is None and ssl_verify is None:
+        return
+    verbose_logger.error(
+        "litellm.%s is set, so per-deployment TLS settings are being IGNORED "
+        "for this request (client_cert=%s, ssl_verify=%s). The global session "
+        "was created without them, so no client certificate will be presented. "
+        "Unset litellm.%s or configure the certificate on that session.",
+        which,
+        "set" if client_cert is not None else "unset",
+        "set" if ssl_verify is not None else "unset",
+        which,
+    )
 
 
 def _get_client_init_params(cls: type) -> Tuple[str, ...]:
@@ -342,6 +374,7 @@ class BaseOpenAILLM:
         asking. Client certificates here are opt-in per deployment only.
         """
         if litellm.aclient_session is not None:
+            _warn_global_session_defeats_tls("aclient_session", ssl_verify, client_cert)
             return litellm.aclient_session
 
         if getattr(litellm, "network_mock", False):
@@ -372,6 +405,7 @@ class BaseOpenAILLM:
     ) -> Optional[httpx.Client]:
         """Sync counterpart of _get_async_http_client -- same defaults, same guarantees."""
         if litellm.client_session is not None:
+            _warn_global_session_defeats_tls("client_session", ssl_verify, client_cert)
             return litellm.client_session
 
         if getattr(litellm, "network_mock", False):

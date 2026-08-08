@@ -211,9 +211,18 @@ async def test_untrusted_ca_is_rejected(mtls_endpoint, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_insecure_skip_tls_verify_bypasses_ca_check(mtls_endpoint, tmp_path):
-    """The bring-up escape hatch works -- and still presents the client cert."""
-    credential = AsyncOAuth2ClientCredential(
+async def test_insecure_skip_tls_verify_with_a_client_cert_is_refused(mtls_endpoint):
+    """The escape hatch must not hand out the mTLS identity.
+
+    This test used to assert the opposite -- "the bring-up escape hatch works and
+    STILL PRESENTS THE CLIENT CERT" -- which is the vulnerability, not a feature:
+    load_cert_chain was applied to a CERT_NONE / check_hostname=False context, so
+    the client certificate was offered to whoever answered the token URL. Verifying
+    nothing while proving who you are is the worst of both.
+    """
+    from litellm.proxy_auth.async_oauth2 import OAuth2ConfigError
+
+    with pytest.raises(OAuth2ConfigError, match="cannot be combined"):
         _config(
             mtls_endpoint,
             ca_bundle=None,
@@ -221,22 +230,23 @@ async def test_insecure_skip_tls_verify_bypasses_ca_check(mtls_endpoint, tmp_pat
             mtls_cert=mtls_endpoint["client_cert"],
             mtls_key=mtls_endpoint["client_key"],
         )
-    )
-    token = await credential.get_token()
-    assert token.token == TOKEN_VALUE
+
+
+def test_insecure_skip_tls_verify_alone_is_still_allowed(mtls_endpoint):
+    """The escape hatch itself is untouched -- only the combination is refused."""
+    config = _config(mtls_endpoint, ca_bundle=None, insecure_skip_tls_verify=True)
+    assert config.insecure_skip_tls_verify is True
+    assert config.mtls_cert is None
 
 
 def test_extra_headers_are_masked_before_logging_but_not_on_the_wire():
     """The minted bearer must not reach logging callbacks.
 
-    litellm's convention is that credentials live in headers, not in the request
-    BODY -- which is why additional_args["headers"] is masked and
-    complete_input_dict is not. extra_headers breaks that convention: it is a
-    provider param, so it travels inside the body dict and the OpenAI SDK only
-    lifts it out to real HTTP headers later. Measured with a real acompletion and a
-    capture CustomLogger, the token appeared at
-    kwargs.additional_args.complete_input_dict.extra_headers.Authorization -- the
-    dict langfuse/s3/datadog/otel/gcs all receive.
+    Two sinks, both measured with a real request and a capture CustomLogger:
+    complete_input_dict["extra_headers"] on the non-streaming path, and
+    additional_args["headers"] on the streaming path. Nothing masked either on the
+    callback path -- _get_masked_headers exists but only builds the debug curl
+    string -- so both are masked now.
     """
     from litellm.litellm_core_utils.litellm_logging import (
         _mask_extra_headers_in_additional_args,
