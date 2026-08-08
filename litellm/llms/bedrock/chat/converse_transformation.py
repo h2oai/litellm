@@ -6,7 +6,7 @@ import copy
 import json
 import time
 import types
-from typing import List, Literal, Optional, Tuple, Union, cast, overload
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast, overload
 
 import httpx
 
@@ -100,45 +100,6 @@ UNSUPPORTED_BEDROCK_CONVERSE_BETA_PATTERNS = [
 ]
 
 
-def _bedrock_tool_choice_type(tool_choice: Any) -> str:
-    """Map an OpenAI tool_choice to the Anthropic ``tool_choice.type`` used in the
-    Bedrock parallel-tool-use config: ``required`` -> ``any``, a named-function
-    dict -> ``tool``, everything else (incl. ``auto`` / unset) -> ``auto``.
-
-    Derives the type from an explicit tool_choice so the parallel-tool-use config
-    does not override the caller's intent with ``auto``.
-    """
-    if tool_choice == "required":
-        return "any"
-    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
-        return "tool"
-    return "auto"
-
-
-def _bedrock_parallel_tool_choice(tool_choice: Any, disable_parallel: bool) -> dict:
-    """Build the Anthropic-on-Bedrock ``tool_choice`` payload for the
-    parallel-tool-use config.
-
-    Derives ``type`` from an explicit tool_choice (see
-    ``_bedrock_tool_choice_type``) and carries the ``disable_parallel_tool_use``
-    flag this config exists to set. For a named-function choice (``type ==
-    "tool"``) it also forwards the function ``name`` — mirroring the native
-    Anthropic transform (``_tool_choice["name"] = _tool_name``). Without the
-    name, ``_apply_parallel_tool_use_config`` drops the native ``toolChoice``
-    that carried it, so Bedrock would receive ``type="tool"`` with no tool named
-    and reject the request.
-    """
-    payload: dict = {
-        "type": _bedrock_tool_choice_type(tool_choice),
-        "disable_parallel_tool_use": disable_parallel,
-    }
-    if payload["type"] == "tool" and isinstance(tool_choice, dict):
-        name = tool_choice.get("function", {}).get("name")
-        if name:
-            payload["name"] = name
-    return payload
-
-
 def _apply_parallel_tool_use_config(
     parallel_tool_use_config: dict,
     additional_request_params: dict,
@@ -155,15 +116,12 @@ def _apply_parallel_tool_use_config(
     equivalent type (any/auto/tool), so drop the native toolChoice to leave a
     single, non-conflicting directive.
     """
-    for key, value in parallel_tool_use_config.items():
-        if (
-            key in additional_request_params
-            and isinstance(additional_request_params[key], dict)
-            and isinstance(value, dict)
-        ):
-            additional_request_params[key].update(value)
-        else:
-            additional_request_params[key] = value
+    # Plain assignment, not a merge. ``additional_request_params`` is built as the
+    # inference params NOT in ``total_supported_params``, and ``tool_choice`` IS in
+    # that set, so the key can never already be present. The old merge branch was
+    # unreachable, and had it been reachable it would have produced a corrupt
+    # hybrid such as {"type": "auto", "name": <user>, "disable_parallel_tool_use": true}.
+    additional_request_params.update(parallel_tool_use_config)
 
     passthrough_tool_choice = parallel_tool_use_config.get("tool_choice")
     if isinstance(passthrough_tool_choice, dict) and "type" in passthrough_tool_choice:
@@ -964,14 +922,12 @@ class AmazonConverseConfig(BaseConfig):
                 if _tool_choice_value is not None:
                     optional_params["tool_choice"] = _tool_choice_value
             if param == "parallel_tool_calls":
-                # ``tool_choice`` forwarded to the Anthropic-on-Bedrock validator
-                # requires a ``type`` (matches the native Anthropic transform,
-                # which sets disable_parallel_tool_use on the existing choice and
-                # defaults to ``type="auto"`` only when none was given). Without a
-                # ``type`` Bedrock Converse returns 400 "missing field `type`".
-                optional_params["_parallel_tool_use_config"] = {
-                    "tool_choice": _bedrock_parallel_tool_choice(non_default_params.get("tool_choice"), not value)
-                }
+                # Deliberately NOT built here: see the block after the reasoning
+                # downgrade at the end of this method. Building it in this loop
+                # meant re-classifying the caller's raw tool_choice with a second
+                # classifier, which could disagree with the native mapping and
+                # then win, because the config drops the native toolChoice.
+                pass
             if param == "thinking":
                 optional_params["thinking"] = value
             elif param == "reasoning_effort" and isinstance(value, str):
@@ -1012,7 +968,67 @@ class AmazonConverseConfig(BaseConfig):
                     )
                     optional_params["tool_choice"] = ToolChoiceValuesBlock(auto={})
 
+        self._map_parallel_tool_use_config(
+            non_default_params=non_default_params, optional_params=optional_params
+        )
+
         return optional_params
+
+    def _map_parallel_tool_use_config(
+        self, non_default_params: dict, optional_params: dict
+    ) -> None:
+        """Build the Anthropic-on-Bedrock parallel-tool-use passthrough.
+
+        Deliberately runs AFTER the whole param loop and after the reasoning
+        downgrade above, and derives the type from the FINAL mapped native
+        ``tool_choice`` block rather than re-reading the caller's raw OpenAI
+        value. Three defects came from doing the latter inside the loop, all of
+        which are silent because ``_apply_parallel_tool_use_config`` deletes the
+        native ``toolChoice`` that would otherwise have carried the truth:
+
+        * The reasoning downgrade rewrites only ``optional_params["tool_choice"]``,
+          so a passthrough built earlier still said ``type="any"`` and re-sent the
+          forced-tool payload that the downgrade exists to prevent.
+        * The raw-value classifier required ``tool_choice["type"] == "function"``
+          while the native mapper treats ANY dict as a named tool, so
+          ``{"function": {"name": ...}}`` silently lost the forced-tool directive
+          and the model was free to answer in prose.
+        * The raw name was forwarded unsanitized, while the native mapper and the
+          tool list both sanitize, so a tool named ``get.current weather`` forced
+          a tool that did not exist in ``toolConfig.tools``.
+
+        Reading the mapped block instead makes disagreement impossible: it is the
+        same value Bedrock would have received natively, and it already carries
+        the sanitized name.
+        """
+        if "parallel_tool_calls" not in non_default_params:
+            return
+        value = non_default_params["parallel_tool_calls"]
+        # Only a literal False has anything to say. ``parallel_tool_calls: true``
+        # is Anthropic's default, so emitting the passthrough for it would move
+        # the caller's forced-tool directive out of the documented Converse field
+        # into an undocumented passthrough for no benefit. ``None`` is not a
+        # request to disable anything either.
+        if not isinstance(value, bool) or value is True:
+            return
+        # ``tool_choice`` without ``tools`` is rejected by Anthropic, so do not
+        # invent one for a request that has no tools.
+        if not non_default_params.get("tools"):
+            return
+
+        native = optional_params.get("tool_choice")
+        tool_choice: Dict[str, Any] = {"disable_parallel_tool_use": True}
+        if isinstance(native, dict) and "any" in native:
+            tool_choice["type"] = "any"
+        elif isinstance(native, dict) and "tool" in native:
+            tool_choice["type"] = "tool"
+            name = native["tool"].get("name")
+            if name:
+                # Already sanitized by map_tool_choice_values.
+                tool_choice["name"] = name
+        else:
+            tool_choice["type"] = "auto"
+        optional_params["_parallel_tool_use_config"] = {"tool_choice": tool_choice}
 
     def _map_request_metadata_param(self, value: Any, optional_params: dict) -> None:
         if value is not None and isinstance(value, dict):
