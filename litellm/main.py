@@ -4996,8 +4996,17 @@ def completion(  # type: ignore
         headers = {}
     if extra_headers is not None:
         headers.update(extra_headers)
-    # Inject proxy auth headers if configured
-    if litellm.proxy_auth is not None:
+    # Inject proxy auth headers if configured.
+    #
+    # hasattr, not `is not None`: `litellm.proxy_auth` is a user-settable global
+    # that starts as None (litellm/__init__.py), but it shares its name with the
+    # litellm.proxy_auth PACKAGE -- so importing anything under that package
+    # (e.g. litellm.proxy_auth.async_oauth2) makes Python bind the submodule to
+    # the parent attribute and silently overwrite the None sentinel with a module
+    # object. The old check then treated "nobody configured this" as "configured",
+    # called get_auth_headers() on a module, and logged a warning on EVERY
+    # completion, proxy-wide.
+    if litellm.proxy_auth is not None and hasattr(litellm.proxy_auth, "get_auth_headers"):
         try:
             proxy_headers = litellm.proxy_auth.get_auth_headers()
             headers.update(proxy_headers)
@@ -5309,6 +5318,8 @@ def completion(  # type: ignore
             prompt_id=prompt_id,
             prompt_variables=prompt_variables,
             ssl_verify=ssl_verify,
+            client_cert=kwargs.get("client_cert", None),
+            client_key=kwargs.get("client_key", None),
             merge_reasoning_content_in_choices=kwargs.get("merge_reasoning_content_in_choices", None),
             use_litellm_proxy=kwargs.get("use_litellm_proxy", False),
             api_version=api_version,
@@ -5948,8 +5959,17 @@ def embedding(
         headers = {}
     if extra_headers is not None:
         headers.update(extra_headers)
-    # Inject proxy auth headers if configured
-    if litellm.proxy_auth is not None:
+    # Inject proxy auth headers if configured.
+    #
+    # hasattr, not `is not None`: `litellm.proxy_auth` is a user-settable global
+    # that starts as None (litellm/__init__.py), but it shares its name with the
+    # litellm.proxy_auth PACKAGE -- so importing anything under that package
+    # (e.g. litellm.proxy_auth.async_oauth2) makes Python bind the submodule to
+    # the parent attribute and silently overwrite the None sentinel with a module
+    # object. The old check then treated "nobody configured this" as "configured",
+    # called get_auth_headers() on a module, and logged a warning on EVERY
+    # completion, proxy-wide.
+    if litellm.proxy_auth is not None and hasattr(litellm.proxy_auth, "get_auth_headers"):
         try:
             proxy_headers = litellm.proxy_auth.get_auth_headers()
             headers.update(proxy_headers)
@@ -6138,6 +6158,7 @@ def embedding(
                 aembedding=aembedding,
                 max_retries=max_retries,
                 shared_session=shared_session,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "databricks":
             api_base = api_base or litellm.api_base or get_secret("DATABRICKS_API_BASE")  # type: ignore
@@ -6552,6 +6573,7 @@ def embedding(
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "fireworks_ai":
             api_key = api_key or litellm.api_key or get_secret_str("FIREWORKS_AI_API_KEY")
@@ -6566,6 +6588,7 @@ def embedding(
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "nebius":
             api_key = api_key or litellm.api_key or get_secret_str("NEBIUS_API_KEY")
@@ -6582,6 +6605,7 @@ def embedding(
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "wandb":
             api_key = api_key or litellm.api_key or get_secret_str("WANDB_API_KEY")
@@ -6600,6 +6624,7 @@ def embedding(
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "sambanova":
             api_key = api_key or litellm.api_key or get_secret_str("SAMBANOVA_API_KEY")
@@ -6693,6 +6718,7 @@ def embedding(
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+                litellm_params=litellm_params_dict,
             )
         elif custom_llm_provider == "sap":
             response = base_llm_http_handler.embedding(

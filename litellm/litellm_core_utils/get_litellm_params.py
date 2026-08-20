@@ -108,6 +108,12 @@ def get_litellm_params(
     prompt_variables: Optional[dict] = None,
     async_call: Optional[bool] = None,
     ssl_verify: Optional[bool] = None,
+    # Per-deployment mutual-TLS material. Declared explicitly (rather than left to
+    # the sparse **kwargs pass-through) so it is always present in litellm_params
+    # for the provider handlers to read -- see
+    # BaseOpenAILLM.tls_client_kwargs in llms/openai/common_utils.py.
+    client_cert: Optional[str] = None,
+    client_key: Optional[str] = None,
     merge_reasoning_content_in_choices: Optional[bool] = None,
     use_litellm_proxy: Optional[bool] = None,
     api_version: Optional[str] = None,
@@ -167,6 +173,8 @@ def get_litellm_params(
         "prompt_variables": prompt_variables,
         "async_call": async_call,
         "ssl_verify": ssl_verify,
+        "client_cert": client_cert,
+        "client_key": client_key,
         "merge_reasoning_content_in_choices": merge_reasoning_content_in_choices,
         "api_version": api_version,
         "max_retries": max_retries,

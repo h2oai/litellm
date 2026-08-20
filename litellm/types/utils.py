@@ -3099,6 +3099,17 @@ agentic_loop_internal_litellm_params = [
 all_litellm_params = (
     agentic_loop_internal_litellm_params
     + [
+        # TLS transport settings. These MUST be listed here: anything absent from
+        # this list is treated as a provider param, swept into extra_body and
+        # flattened into the upstream JSON request body. Verified against a
+        # loopback server that the body carried
+        #   {"client_cert": "...", "client_key": "...", "ssl_verify": "..."}
+        # which discloses container filesystem layout, 400s on strict
+        # OpenAI-compatible servers, and -- because credential refs may hold
+        # inline PEM -- can transmit a private key to the provider.
+        "ssl_verify",
+        "client_cert",
+        "client_key",
         "metadata",
         "litellm_metadata",
         "litellm_trace_id",

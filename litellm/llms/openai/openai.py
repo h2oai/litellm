@@ -1,3 +1,4 @@
+import ssl
 import time
 import types
 from typing import (
@@ -11,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Tuple,
     Union,
     cast,
 )
@@ -358,7 +360,14 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         organization: Optional[str] = None,
         client: Optional[Union[OpenAI, AsyncOpenAI]] = None,
         shared_session: Optional["ClientSession"] = None,
+        ssl_verify: Optional[Union[bool, str, ssl.SSLContext]] = None,
+        client_cert: Optional[Union[str, Tuple[str, str]]] = None,
     ) -> Optional[Union[OpenAI, AsyncOpenAI]]:
+        # NOTE: locals() must be captured BEFORE any local is added below, and any
+        # new parameter that changes the resulting client must also be listed in
+        # get_openai_client_cache_key's LITELLM_CLIENT_SPECIFIC_PARAMS -- otherwise
+        # two deployments differing only by that parameter share one cached client.
+        # ssl_verify/client_cert are registered there.
         client_initialization_params: Dict = locals()
         if client is None:
             if not isinstance(max_retries, int):
@@ -378,7 +387,11 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 _new_client: Union[OpenAI, AsyncOpenAI] = AsyncOpenAI(
                     api_key=api_key,
                     base_url=api_base,
-                    http_client=OpenAIChatCompletion._get_async_http_client(shared_session=shared_session),
+                    http_client=OpenAIChatCompletion._get_async_http_client(
+                        shared_session=shared_session,
+                        ssl_verify=ssl_verify,
+                        client_cert=client_cert,
+                    ),
                     timeout=timeout,
                     max_retries=max_retries,
                     organization=organization,
@@ -387,7 +400,10 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 _new_client = OpenAI(
                     api_key=api_key,
                     base_url=api_base,
-                    http_client=OpenAIChatCompletion._get_sync_http_client(),
+                    http_client=OpenAIChatCompletion._get_sync_http_client(
+                        ssl_verify=ssl_verify,
+                        client_cert=client_cert,
+                    ),
                     timeout=timeout,
                     max_retries=max_retries,
                     organization=organization,
@@ -715,6 +731,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                             max_retries=max_retries,
                             organization=organization,
                             stream_options=stream_options,
+                            litellm_params=litellm_params,
                         )
                     else:
                         if not isinstance(max_retries, int):
@@ -728,6 +745,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                             max_retries=max_retries,
                             organization=organization,
                             client=client,
+                            **BaseOpenAILLM.tls_client_kwargs(litellm_params),
                         )
 
                         ## LOGGING
@@ -869,6 +887,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     organization=organization,
                     client=client,
                     shared_session=shared_session,
+                    **BaseOpenAILLM.tls_client_kwargs(litellm_params),
                 )
 
                 ## LOGGING
@@ -964,6 +983,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         max_retries=None,
         headers=None,
         stream_options: Optional[dict] = None,
+        litellm_params: Optional[dict] = None,
     ):
         data["stream"] = True
         data.update(self.get_stream_options(stream_options=stream_options, api_base=api_base))
@@ -977,6 +997,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
             max_retries=max_retries,
             organization=organization,
             client=client,
+            **BaseOpenAILLM.tls_client_kwargs(litellm_params),
         )
         ## LOGGING
         logging_obj.pre_call(
@@ -1049,6 +1070,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     organization=organization,
                     client=client,
                     shared_session=shared_session,
+                    **BaseOpenAILLM.tls_client_kwargs(litellm_params),
                 )
                 ## LOGGING
                 logging_obj.pre_call(
@@ -1194,6 +1216,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         client: Optional[AsyncOpenAI] = None,
         max_retries=None,
         shared_session: Optional["ClientSession"] = None,
+        litellm_params: Optional[dict] = None,
     ):
         try:
             openai_aclient: AsyncOpenAI = self._get_openai_client(  # type: ignore
@@ -1204,6 +1227,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 client=client,
                 shared_session=shared_session,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
             headers, response = await self.make_openai_embedding_request(
                 openai_aclient=openai_aclient,
@@ -1266,6 +1290,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         aembedding=None,
         max_retries: Optional[int] = None,
         shared_session: Optional["ClientSession"] = None,
+        litellm_params: Optional[dict] = None,
     ) -> EmbeddingResponse:
         super().embedding()
         try:
@@ -1292,6 +1317,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     client=client,
                     max_retries=max_retries,
                     shared_session=shared_session,
+                    litellm_params=litellm_params,
                 )
 
             openai_client: OpenAI = self._get_openai_client(  # type: ignore
@@ -1301,6 +1327,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 timeout=timeout,
                 max_retries=max_retries,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             ## embedding CALL
@@ -1351,6 +1378,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         max_retries=None,
         organization: Optional[str] = None,
         headers: Optional[dict] = None,
+        litellm_params: Optional[dict] = None,
     ):
         response = None
         try:
@@ -1362,6 +1390,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 organization=organization,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             if headers:
@@ -1403,6 +1432,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         aimg_generation=None,
         organization: Optional[str] = None,
         headers: Optional[dict] = None,
+        litellm_params: Optional[dict] = None,
     ) -> ImageResponse:
         data = {}
         try:
@@ -1424,6 +1454,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     max_retries=max_retries,
                     organization=organization,
                     headers=headers,
+                    litellm_params=litellm_params,
                 )  # type: ignore
 
             openai_client: OpenAI = self._get_openai_client(  # type: ignore
@@ -1434,6 +1465,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 max_retries=max_retries,
                 organization=organization,
                 client=client,
+                **BaseOpenAILLM.tls_client_kwargs(litellm_params),
             )
 
             ## LOGGING
