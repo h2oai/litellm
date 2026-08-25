@@ -49,15 +49,15 @@ proxy = [
     "orjson==3.11.6",
     "apscheduler==3.11.2",
     "fastapi-sso==0.19.0",
-    "PyJWT==2.12.0",
-    "python-multipart==0.0.27",
-    "cryptography==46.0.7",
+    "PyJWT==2.13.0",
+    "python-multipart==0.0.31",
+    "cryptography==50.0.0",
     "pynacl==1.6.2",
     "websockets==15.0.1",
     "boto3==1.43.1",
     "azure-identity==1.25.2",
     "azure-storage-blob==12.28.0",
-    "mcp==1.26.0",
+    "mcp==1.28.1",
     "litellm-proxy-extras==0.4.73",
     "litellm-enterprise==0.1.41",
     "RestrictedPython==8.1",
@@ -88,7 +88,7 @@ semantic-router = [
     "semantic-router==0.1.12; python_version < '3.14'",
     "aurelio-sdk==0.0.19; python_version < '3.14'",
 ]
-mlflow = ["mlflow==3.11.1"]
+mlflow = ["mlflow==3.15.0"]
 grpc = [
     # Newest non-yanked release older than the 30-day cutoff.
     "grpcio==1.78.0",
@@ -115,7 +115,7 @@ proxy-runtime = [
     "opentelemetry-api==1.28.0",
     "opentelemetry-sdk==1.28.0",
     "opentelemetry-exporter-otlp==1.28.0",
-    "ddtrace==2.19.0",
+    "ddtrace==4.8.2",
     "sentry-sdk==2.21.0",
     "mangum==0.17.0",
     "azure-ai-contentsafety==1.0.0",
@@ -164,7 +164,7 @@ dev = [
     "parameterized==0.9.0",
     "openapi-core==0.22.0; python_version < '3.14'",
     "pytest-timeout==2.4.0",
-    "vcrpy==8.1.1",
+    "vcrpy==8.2.1",
     "pytest-recording==0.13.4",
 ]
 proxy-dev = [
@@ -183,13 +183,13 @@ ci = [
     # protobuf, Pillow is a compiled C extension).
     "tenacity==8.5.0",
     "google-generativeai==0.8.6",
-    "Pillow==12.2.0",
+    "Pillow==12.3.0",
     # Azure batch E2E tests still import psycopg2 directly.
     "psycopg2-binary==2.9.11",
     "pytest-codspeed==4.3.0",
     "pytest-retry==1.7.0",
     "pyarrow==22.0.0",
-    "langchain==1.2.10",
+    "langchain==1.3.9",
     "lunary==1.4.36; python_version == '3.10'",
     "lunary==1.4.37; python_version >= '3.11'",
     "logfire==4.6.0",
