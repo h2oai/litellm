@@ -1,4 +1,4 @@
-"""A deploy-time policy that routes with a trained H2O Lena router.
+"""A deploy-time policy that routes with a trained H2ORouter router.
 
 WHY THIS IS THE WHOLE INTEGRATION. The proxy keeps every capability LiteLLM has -- streaming, fallbacks,
 retries, budgets, guardrails, caching, and its OWN routing strategies (``simple-shuffle``,
@@ -9,7 +9,7 @@ LiteLLM, so an upgrade of the fork does not have to re-examine our routing, and 
 have to re-implement anything LiteLLM already does.
 
 **A REQUEST FOR A MODEL WE DO NOT KNOW IS NOT TOUCHED.** If the expressed model is not the name of a
-loaded Lena router, this returns a pass-through Plan and LiteLLM behaves exactly as it would without us
+loaded H2ORouter router, this returns a pass-through Plan and LiteLLM behaves exactly as it would without us
 -- including using its own routing strategy for that model group. The proxy therefore still works as a
 plain generic model router with the learned router simply not in the path. That property is the reason
 the hook is a rewrite rather than a replacement.
@@ -25,19 +25,19 @@ and point the hook at this module:
 
 .. code-block:: bash
 
-    export H2O_ROUTER_POLICY_MODULE=litellm.integrations.h2o.router.lena_policy
-    export LENA_ARTIFACTS=/artifacts            # where trained routers were saved
-    # or, to consult a running Lena service instead of loading in-process:
-    export LENA_ROUTER_URL=http://lena:8080
+    export H2O_ROUTER_POLICY_MODULE=litellm.integrations.h2o.router.h2orouter_policy
+    export H2OROUTER_ARTIFACTS=/artifacts            # where trained routers were saved
+    # or, to consult a running H2ORouter service instead of loading in-process:
+    export H2OROUTER_ROUTER_URL=http://h2orouter:8080
 
 TWO WAYS TO REACH A ROUTER, and the trade is latency against coupling:
 
-``in-process`` (default when ``LENA_ARTIFACTS`` is set)
+``in-process`` (default when ``H2OROUTER_ARTIFACTS`` is set)
     Loads the saved routers once and decides locally. **No network hop per request**, which matters
-    because this runs inside the request path. Needs `lenarouter` installed in the proxy's environment.
+    because this runs inside the request path. Needs `h2orouter` installed in the proxy's environment.
 
-``http`` (when ``LENA_ROUTER_URL`` is set)
-    Asks the Lena service. Costs a local round trip per request, but the proxy needs neither the package
+``http`` (when ``H2OROUTER_ROUTER_URL`` is set)
+    Asks the H2ORouter service. Costs a local round trip per request, but the proxy needs neither the package
     nor the artefacts, and routers can be retrained without restarting the proxy. Prefer this when the
     two are operated by different people.
 
@@ -73,17 +73,17 @@ def _warn_once(key: str, msg: str, *args) -> None:
 
 
 def _load_local() -> None:
-    """Load every router saved under ``LENA_ARTIFACTS``. Never raises."""
+    """Load every router saved under ``H2OROUTER_ARTIFACTS``. Never raises."""
     global _LOADED
     with _LOCK:
         if _LOADED:
             return
         _LOADED = True
-        root = os.environ.get("LENA_ARTIFACTS")
+        root = os.environ.get("H2OROUTER_ARTIFACTS")
         if not root:
             return
         try:
-            from lenarouter.api import persist
+            from h2orouter.api import persist
 
             persist.ARTIFACT_DIR = root
             res = persist.load_all()
@@ -104,13 +104,13 @@ def _load_local() -> None:
                 }
             for s in res.get("skipped", []):
                 logger.warning("h2o-router: skipped %s (%s)", s.get("name"), s.get("reason"))
-            logger.info("h2o-router: loaded %d Lena router(s) from %s", len(_ROUTERS), root)
+            logger.info("h2o-router: loaded %d H2ORouter router(s) from %s", len(_ROUTERS), root)
         except ImportError:
             _warn_once(
                 "import",
-                "h2o-router: LENA_ARTIFACTS is set but `lenarouter` is not installed in this "
-                "environment; passing every request through. Install it, or set LENA_ROUTER_URL to "
-                "consult the Lena service over HTTP instead.",
+                "h2o-router: H2OROUTER_ARTIFACTS is set but `h2orouter` is not installed in this "
+                "environment; passing every request through. Install it, or set H2OROUTER_ROUTER_URL to "
+                "consult the H2ORouter service over HTTP instead.",
             )
         except Exception as exc:  # noqa: BLE001 - a bad artefact must not take the proxy down
             _warn_once("load", "h2o-router: could not load routers from %s (%r)", root, exc)
@@ -135,8 +135,8 @@ def _prompt_of(data: Dict[str, Any]) -> str:
 
 
 def _decide_http(name: str, prompt: str) -> Optional[str]:
-    """Ask a running Lena service. Returns the chosen model, or None to pass through."""
-    url = os.environ.get("LENA_ROUTER_URL", "").rstrip("/")
+    """Ask a running H2ORouter service. Returns the chosen model, or None to pass through."""
+    url = os.environ.get("H2OROUTER_ROUTER_URL", "").rstrip("/")
     if not url:
         return None
     try:
@@ -145,7 +145,7 @@ def _decide_http(name: str, prompt: str) -> Optional[str]:
         r = httpx.post(
             f"{url}/v1/routers/{name}/route",
             json={"prompts": [prompt]},
-            timeout=float(os.environ.get("LENA_ROUTER_TIMEOUT", "5")),
+            timeout=float(os.environ.get("H2OROUTER_ROUTER_TIMEOUT", "5")),
         )
         if r.status_code != 200:
             _warn_once(f"http-{name}", "h2o-router: %s returned HTTP %s", name, r.status_code)
@@ -157,13 +157,13 @@ def _decide_http(name: str, prompt: str) -> Optional[str]:
 
 
 def _ensure_proxy_targets() -> None:
-    """Delegate to the package, which owns the registry. See `lenarouter.api.common`.
+    """Delegate to the package, which owns the registry. See `h2orouter.api.common`.
 
-    Kept as a thin wrapper so this module still works when `lenarouter` is absent -- the proxy then
+    Kept as a thin wrapper so this module still works when `h2orouter` is absent -- the proxy then
     has no targets of ours to sync, and every request passes through untouched.
     """
     try:
-        from lenarouter.api.common import ensure_proxy_targets
+        from h2orouter.api.common import ensure_proxy_targets
     except ImportError:
         return
     try:
@@ -188,10 +188,10 @@ def _passthrough_unknown(name: str) -> bool:
 
     This does not invent credentials and it does not hide failures -- an unroutable name still fails,
     but with the provider's own error ("no API key for anthropic") rather than a proxy-level rejection
-    that reads as though the model does not exist. Set LENA_PASSTHROUGH_UNKNOWN_MODELS=false for a
+    that reads as though the model does not exist. Set H2OROUTER_PASSTHROUGH_UNKNOWN_MODELS=false for a
     proxy that should only ever serve models an operator listed.
     """
-    if os.environ.get("LENA_PASSTHROUGH_UNKNOWN_MODELS", "true").strip().lower() in (
+    if os.environ.get("H2OROUTER_PASSTHROUGH_UNKNOWN_MODELS", "true").strip().lower() in (
         "0",
         "false",
         "no",
@@ -227,7 +227,7 @@ def _in_process(name: str):
     it would route at whatever dial the last call happened to leave behind.
     """
     try:
-        from lenarouter.api.store import STORE
+        from h2orouter.api.store import STORE
     except ImportError:
         return None
     rec = STORE.get(name)
@@ -242,7 +242,7 @@ def _record(router, chosen):
     router picked it over three others. Never costs a request -- a counter that can fail a call is
     not worth having."""
     try:
-        from lenarouter.api import usage
+        from h2orouter.api import usage
 
         usage.record(router, chosen)
     except Exception:  # noqa: BLE001
@@ -269,11 +269,11 @@ def _decide_from(rec, data: Dict[str, Any], expressed_model: str) -> Plan:
     # container -- the router chose correctly and handed the proxy something it did not know.
     _passthrough_unknown(target)
     _record(expressed_model, target)
-    return Plan(mode="route_single", workers=[WorkerCall(model=target, role_hint="lena")])
+    return Plan(mode="route_single", workers=[WorkerCall(model=target, role_hint="h2orouter")])
 
 
 def decide_plan(data: Dict[str, Any], expressed_model: str) -> Plan:
-    """Route with a Lena router when the caller named one; otherwise change nothing.
+    """Route with a H2ORouter router when the caller named one; otherwise change nothing.
 
     The pass-through branch is the important one. It is what lets this hook be installed permanently
     on a proxy that mostly serves ordinary models: those requests take the same path they always did,
@@ -294,7 +294,7 @@ def decide_plan(data: Dict[str, Any], expressed_model: str) -> Plan:
     # not one of ours -- make sure the proxy can actually serve it before passing through
     _passthrough_unknown(expressed_model)
 
-    if os.environ.get("LENA_ROUTER_URL"):
+    if os.environ.get("H2OROUTER_ROUTER_URL"):
         target = _decide_http(expressed_model, _prompt_of(data))
         if target and target != expressed_model:
             _passthrough_unknown(target)
@@ -326,7 +326,7 @@ def decide_plan(data: Dict[str, Any], expressed_model: str) -> Plan:
         )
         return Plan.passthrough(expressed_model)
 
-    return Plan(mode="route_single", workers=[WorkerCall(model=target, role_hint="lena")])
+    return Plan(mode="route_single", workers=[WorkerCall(model=target, role_hint="h2orouter")])
 
 
 def reload_routers() -> int:
