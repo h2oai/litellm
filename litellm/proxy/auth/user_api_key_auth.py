@@ -2674,8 +2674,8 @@ def get_api_key_from_custom_header(request: Request, custom_litellm_key_header_n
     if custom_api_key:
         api_key = _get_bearer_token(api_key=custom_api_key)
         verbose_proxy_logger.debug(
-            "Found custom API key using header: {}, setting api_key={}".format(
-                custom_litellm_key_header_name, abbreviate_api_key(api_key)
+            "Found custom API key using header: {}, api_key has been set".format(
+                custom_litellm_key_header_name
             )
         )
     else:
