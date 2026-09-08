@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import threading
 from typing import Any, Dict, Optional
 
@@ -236,15 +237,27 @@ def _in_process(name: str):
     return rec
 
 
-def _record(router, chosen):
+def _record(router, chosen, router_ms=None):
     """Count the decision. NOTHING ELSE IN THE STACK CAN: by the time the proxy logs the call the
     model has already been rewritten, so it records a call to the chosen model and has no idea a
     router picked it over three others. Never costs a request -- a counter that can fail a call is
-    not worth having."""
+    not worth having.
+
+    `router_ms` is how long the decision took. It is passed on because nothing downstream can measure
+    it either: the proxy's own timing covers the model call, which is orders of magnitude larger and
+    hides it entirely. The consuming package publishes it on the response so a caller can see what the
+    routing step cost them on every request rather than only on a dry run.
+
+    Sent positionally-optional so an older h2orouter that takes two arguments still works: a version
+    skew here would otherwise be a TypeError on every routed request, which is far worse than a
+    missing number."""
     try:
         from h2orouter.api import usage
 
-        usage.record(router, chosen)
+        try:
+            usage.record(router, chosen, router_ms)
+        except TypeError:
+            usage.record(router, chosen)
     except Exception:  # noqa: BLE001
         pass
 
@@ -255,6 +268,7 @@ def _decide_from(rec, data: Dict[str, Any], expressed_model: str) -> Plan:
     if not prompt:
         _record(expressed_model, None)
         return Plan.passthrough(expressed_model)
+    t0 = time.perf_counter()
     try:
         k = int(rec["router"].predict([prompt])[0])
         target = list(rec["spec"].models)[k]
@@ -267,8 +281,9 @@ def _decide_from(rec, data: Dict[str, Any], expressed_model: str) -> Plan:
     # coming in, so it is the REWRITTEN one the proxy must be able to resolve. Missing this is why
     # the preset walkthrough still failed with `Invalid model name passed in model=gpt-5` on a fresh
     # container -- the router chose correctly and handed the proxy something it did not know.
+    decided_ms = (time.perf_counter() - t0) * 1000.0
     _passthrough_unknown(target)
-    _record(expressed_model, target)
+    _record(expressed_model, target, round(decided_ms, 3))
     return Plan(mode="route_single", workers=[WorkerCall(model=target, role_hint="h2orouter")])
 
 
