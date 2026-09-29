@@ -3,6 +3,7 @@ baggage helpers, metrics, the typed coercion helpers, mapper branches, span-name
 builders, and the registry validator's failure paths. Needs the OTel SDK."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -225,6 +226,27 @@ def test_genai_mapper_all_request_params():
     assert attrs[GenAI.REQUEST_STOP_SEQUENCES] == ["STOP"]
     assert attrs[GenAI.REQUEST_SEED] == 42
     assert attrs["server.port"] == 443
+
+
+def test_genai_mapper_cache_token_attrs():
+    cached = replace(
+        _full_llm_call(),
+        usage=LLMUsage(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            cache_creation_input_tokens=7,
+            cache_read_input_tokens=3,
+        ),
+    )
+    attrs = GenAIMapper().map(cached)
+    assert attrs[GenAI.USAGE_CACHE_CREATION_INPUT_TOKENS] == 7
+    assert attrs[GenAI.USAGE_CACHE_READ_INPUT_TOKENS] == 3
+
+    # No cache usage keeps the span sparse: neither key present.
+    uncached = GenAIMapper().map(_full_llm_call())
+    assert GenAI.USAGE_CACHE_CREATION_INPUT_TOKENS not in uncached
+    assert GenAI.USAGE_CACHE_READ_INPUT_TOKENS not in uncached
 
 
 def test_genai_mapper_stamps_input_output_messages():
@@ -451,6 +473,30 @@ def test_parse_headers():
     assert providers.parse_headers("no-equals") == {}
 
 
+def test_parse_headers_percent_decodes_values():
+    """A percent-encoded OTLP header value reaches the exporter decoded.
+
+    ``OTEL_EXPORTER_OTLP_HEADERS`` is W3C Baggage encoded, and Grafana Cloud
+    documents ``Authorization=Basic%20<token>``. Forwarding the literal ``%20``
+    makes the backend reject the export as a malformed credential.
+    """
+    token = "MTMzNzc4MzpnbGNfZXlKdklqb2lNVEl6TkNJPQ=="
+    assert providers.parse_headers(f"Authorization=Basic%20{token}") == {"authorization": f"Basic {token}"}
+    assert providers.parse_headers("x-scope-orgid=team%20a") == {"x-scope-orgid": "team a"}
+
+
+def test_parse_headers_keeps_unencoded_values_working():
+    """Values that are not percent-encoded keep parsing unchanged.
+
+    Vendors that document a bare space, and litellm's own presets, must survive
+    the switch to the spec-compliant parser. Base64 padding also means a value
+    can contain ``=``, so only the first one may split the pair.
+    """
+    assert providers.parse_headers("Authorization=Bearer sk-123") == {"authorization": "Bearer sk-123"}
+    assert providers.parse_headers("api_key=abc,space_id=xyz") == {"api_key": "abc", "space_id": "xyz"}
+    assert providers.parse_headers("api_key=YWJjZA==") == {"api_key": "YWJjZA=="}
+
+
 def test_otlp_traces_endpoint_normalization():
     norm = providers._otlp_traces_endpoint
     # A base endpoint gets the signal path appended (the common OTLP env shape).
@@ -485,6 +531,24 @@ def test_build_span_exporter_variants():
         OpenTelemetryV2Config(exporter="otlp_http", endpoint="http://h:4318")
     )
     assert "OTLPSpanExporter" in type(http_exporter).__name__
+
+
+def test_otlp_metric_exporter_uses_cumulative_histogram_temporality():
+    """Histograms must export as cumulative, not delta.
+
+    Prometheus-backed OTLP receivers (Grafana Cloud / Mimir) reject delta
+    histograms with ``invalid temporality and type combination`` and drop the
+    entire metric batch, so a delta default silently loses every GenAI metric.
+    """
+    from opentelemetry.sdk.metrics import Histogram
+    from opentelemetry.sdk.metrics.export import AggregationTemporality
+
+    reader = providers.build_metric_reader(
+        OpenTelemetryV2Config(exporter="otlp_http", endpoint="http://h:4318")
+    )
+    temporality = reader._exporter._preferred_temporality  # noqa: SLF001  # exporter exposes no public accessor
+
+    assert temporality[Histogram] is AggregationTemporality.CUMULATIVE
 
 
 def test_otlp_logs_endpoint_normalization():
