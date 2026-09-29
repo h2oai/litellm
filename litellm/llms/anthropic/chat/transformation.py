@@ -1403,6 +1403,9 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 )
 
                 if _tool_choice is not None:
+                    _tool_choice = AnthropicConfig._apply_forced_tool_choice(
+                        model, _tool_choice, drop_params, self._resolved_provider
+                    )
                     optional_params["tool_choice"] = _tool_choice
             elif param == "stream" and value is True:
                 optional_params["stream"] = value
@@ -1432,7 +1435,11 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     _tool = self.map_response_format_to_anthropic_tool(value, optional_params, is_thinking_enabled)
                     if _tool is None:
                         continue
-                    if not is_thinking_enabled:
+                    # NOT FORCED where the model refuses forced tool use (thinking always on):
+                    # forcing it is a 400 on every JSON-mode request to such a model
+                    if not is_thinking_enabled and not AnthropicConfig.forced_tool_use_unsupported(
+                        model, self._resolved_provider
+                    ):
                         _tool_choice = {
                             "name": RESPONSE_FORMAT_TOOL_NAME,
                             "type": "tool",
