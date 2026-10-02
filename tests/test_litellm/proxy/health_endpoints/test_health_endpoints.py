@@ -2350,12 +2350,14 @@ def test_clean_endpoint_data_strips_credentials_keeps_routing_fields():
         "api_base": "https://example.test/v1",
         "api_version": "2024-10-21",
         "aws_access_key_id": "AKIAEXAMPLE",
+        "h2o_oauth": {"client_id": "c", "client_private_key": "-----BEGIN EC PRIVATE KEY-----x"},
     }
 
     cleaned = _clean_endpoint_data(raw, details=True)
 
     assert "api_key" not in cleaned
     assert "aws_access_key_id" not in cleaned
+    assert "h2o_oauth" not in cleaned
     assert cleaned.get("api_base") == "https://example.test/v1"
     assert cleaned.get("api_version") == "2024-10-21"
 

@@ -2155,6 +2155,53 @@ class TestIsRequestBodySafeBlocksEndpointTargetingFields:
         assert field in str(exc.value)
 
     @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("h2o_oauth", {"token_url": "https://attacker.example/token", "client_id": "x"}),
+            ("ssl_verify", False),
+            ("client_cert", "/etc/ssl/private/other.crt"),
+            ("client_key", "/etc/ssl/private/other.key"),
+        ],
+    )
+    def test_deployment_transport_and_oauth_config_in_request_body_is_rejected(self, field, value):
+        with pytest.raises(ValueError, match="Rejected Request") as exc:
+            is_request_body_safe(
+                request_body={"model": "gpt-4", field: value},
+                general_settings={},
+                llm_router=None,
+                model="gpt-4",
+            )
+        assert field in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "request_body",
+        [
+            {"h2o_oauth": {"token_url": "https://attacker.example/token", "client_private_key": "os.environ/KEY"}},
+            {"client_cert": "/etc/ssl/private/other.crt"},
+            {"client_key": "/etc/ssl/private/other.key"},
+            {"litellm_embedding_config": {"h2o_oauth": {"token_url": "https://attacker.example/token"}}},
+        ],
+    )
+    def test_server_side_secret_and_file_references_are_rejected_even_with_client_side_credentials(
+        self, request_body
+    ):
+        with pytest.raises(ValueError, match="Rejected Request"):
+            is_request_body_safe(
+                request_body={"model": "gpt-4", **request_body},
+                general_settings={"allow_client_side_credentials": True},
+                llm_router=None,
+                model="gpt-4",
+            )
+
+    def test_ssl_verify_stays_under_the_client_side_credentials_opt_in(self):
+        assert is_request_body_safe(
+            request_body={"model": "gpt-4", "ssl_verify": False},
+            general_settings={"allow_client_side_credentials": True},
+            llm_router=None,
+            model="gpt-4",
+        )
+
+    @pytest.mark.parametrize(
         "field",
         ["api_base", "base_url", "user_config", "langfuse_host", "slack_webhook_url"],
     )

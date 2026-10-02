@@ -121,3 +121,16 @@ def test_remove_sensitive_info_from_deployment_with_excluded_keys():
 
     # api_key should still be removed (popped) regardless of excluded_keys
     assert "api_key" not in sanitized_config["litellm_params"]
+
+
+def test_remove_sensitive_info_drops_the_whole_h2o_oauth_block():
+    sanitized = remove_sensitive_info_from_deployment(
+        {
+            "model_name": "gw",
+            "litellm_params": {
+                "model": "openai/gw",
+                "h2o_oauth": {"token_url": "https://idp.example/token", "client_id": "c", "client_private_key": "k"},
+            },
+        }
+    )
+    assert sanitized["litellm_params"] == {"model": "openai/gw"}
