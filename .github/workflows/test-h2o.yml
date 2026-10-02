@@ -1,0 +1,37 @@
+name: "h2o Unit Tests"
+
+on:
+  pull_request:
+    branches:
+      - h2o-main
+  push:
+    branches:
+      - h2o-main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  h2o:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/_test-unit-base.yml
+    with:
+      test-path: >-
+        tests/test_litellm/integrations/h2o
+        tests/test_litellm/llms/openai/test_openai_client_tls.py
+        tests/test_litellm/proxy/auth/test_auth_utils.py
+        tests/test_litellm/proxy/common_utils/test_openai_endpoint_utils.py
+        tests/test_litellm/proxy/health_endpoints/test_health_endpoints.py
+      artifact-name: h2o
+      workers: 2
+      reruns: 1
+      timeout-minutes: 20
+      job-timeout-minutes: 60

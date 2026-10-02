@@ -376,6 +376,34 @@ def get_ssl_configuration(
     return ssl_verify
 
 
+def get_client_cert_ssl_context(
+    ssl_verify: VerifyTypes | None,
+    client_cert: str,
+    client_key: str | None = None,
+) -> ssl.SSLContext:
+    if isinstance(ssl_verify, ssl.SSLContext):
+        raise TypeError("client_cert cannot be combined with an ssl.SSLContext ssl_verify; pass a CA bundle path")
+    resolved_verify: Final = get_ssl_verify(ssl_verify)
+    context: Final = (
+        _create_unverified_client_context()
+        if resolved_verify is False
+        else _create_ssl_context(
+            cafile=resolved_verify if isinstance(resolved_verify, str) else certifi.where(),
+            ssl_security_level=os.getenv("SSL_SECURITY_LEVEL", litellm.ssl_security_level),
+            ssl_ecdh_curve=os.getenv("SSL_ECDH_CURVE", litellm.ssl_ecdh_curve),
+        )
+    )
+    context.load_cert_chain(certfile=client_cert, keyfile=client_key)
+    return context
+
+
+def _create_unverified_client_context() -> ssl.SSLContext:
+    context: Final = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 _shared_realtime_ssl_context: bool | str | ssl.SSLContext | None = None
 
 
@@ -1440,6 +1468,21 @@ class HTTPHandler:
             return getattr(litellm, "sync_transport", None)
 
 
+_CACHE_KEY_ONLY_PARAMS: Final = frozenset(("disable_aiohttp_transport", "client_cert", "client_key"))
+
+
+def _handler_params(params: dict) -> dict:  # mutable-ok: the handlers are built from an untyped **params dict
+    client_cert: Final = params.get("client_cert")
+    tls_override: Final = (
+        (("ssl_verify", get_client_cert_ssl_context(params.get("ssl_verify"), client_cert, params.get("client_key"))),)
+        if client_cert
+        else ()
+    )
+    return {  # mutable-ok: the handlers are built from an untyped **params dict
+        k: v for k, v in (*params.items(), *tls_override) if k not in _CACHE_KEY_ONLY_PARAMS
+    }
+
+
 def get_async_httpx_client(
     llm_provider: LlmProviders | httpxSpecialProvider,
     params: dict | None = None,
@@ -1476,7 +1519,7 @@ def get_async_httpx_client(
 
     if params is not None:
         # Filter out params that are only used for cache key, not for AsyncHTTPHandler.__init__
-        handler_params: Final = {k: v for k, v in params.items() if k != "disable_aiohttp_transport"}
+        handler_params: Final = _handler_params(params)
         handler_params["shared_session"] = shared_session
         _new_client = AsyncHTTPHandler(**handler_params)
     else:
@@ -1526,7 +1569,7 @@ def _get_httpx_client(params: dict | None = None) -> HTTPHandler:
 
     if params is not None:
         # Filter out params that are only used for cache key, not for HTTPHandler.__init__
-        handler_params: Final = {k: v for k, v in params.items() if k != "disable_aiohttp_transport"}
+        handler_params: Final = _handler_params(params)
         _new_client = HTTPHandler(**handler_params)
     else:
         _new_client = HTTPHandler(timeout=_default_cached_client_timeout())

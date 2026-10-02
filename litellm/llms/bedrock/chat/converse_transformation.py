@@ -968,7 +968,41 @@ class AmazonConverseConfig(BaseConfig):
                     )
                     optional_params["tool_choice"] = ToolChoiceValuesBlock(auto={})
 
+        self._drop_parallel_tool_use_config_with_nothing_to_say(
+            non_default_params=non_default_params, optional_params=optional_params
+        )
+
         return optional_params
+
+    @staticmethod
+    def _drop_parallel_tool_use_config_with_nothing_to_say(
+        non_default_params: Mapping[str, object], optional_params: dict
+    ) -> None:
+        """h2o: withhold the parallel-tool-use passthrough where it can only do harm.
+
+        Runs after the whole param loop, so it sees the MAPPED tools (including the
+        synthetic tool a json_schema ``response_format`` injects) rather than the
+        caller's raw value, whatever order the params arrived in.
+
+        * No mapped tools: the passthrough is an Anthropic ``tool_choice``, which
+          Anthropic rejects when sent without ``tools``. A truthy non-list ``tools``
+          (e.g. a bare dict) is skipped by the mapping loop, so the raw value is not
+          a safe guard.
+        * ``tool_choice="none"``: ``map_tool_choice_values`` drops it (with
+          drop_params), which is indistinguishable afterwards from "sent nothing",
+          so check the raw value and do not assert ``type="auto"`` for a caller who
+          asked for no tool use. litellm's own Anthropic transform does the same.
+        * ``parallel_tool_calls`` that is not a bool (an explicit null): ``not None``
+          is True, which would turn a null into disable_parallel_tool_use=True.
+        """
+        if "_parallel_tool_use_config" not in optional_params:
+            return
+        if (
+            not optional_params.get("tools")
+            or non_default_params.get("tool_choice") == "none"
+            or not isinstance(non_default_params.get("parallel_tool_calls"), bool)
+        ):
+            optional_params.pop("_parallel_tool_use_config", None)
 
     def _map_request_metadata_param(self, value: Any, optional_params: dict) -> None:
         if value is not None and isinstance(value, dict):

@@ -32,6 +32,7 @@ def remove_sensitive_info_from_deployment(
     deployment_dict["litellm_params"].pop("vertex_ai_credentials", None)
     deployment_dict["litellm_params"].pop("aws_access_key_id", None)
     deployment_dict["litellm_params"].pop("aws_secret_access_key", None)
+    deployment_dict["litellm_params"].pop("h2o_oauth", None)
 
     # Rate-limit config fields must never be masked — they are integers, not credentials.
     # The field names contain "key" which matches the masker's sensitive pattern, so we

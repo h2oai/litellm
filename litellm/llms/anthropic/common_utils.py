@@ -441,6 +441,52 @@ class AnthropicModelInfo(BaseLLMModelInfo):
         return AnthropicModelInfo._supports_model_capability(model, "thinking_always_on", custom_llm_provider)
 
     @staticmethod
+    def forced_tool_use_unsupported(model: str, custom_llm_provider: str = "anthropic") -> bool:
+        """True when the model map flags ``supports_forced_tool_use: false``.
+
+        Such a model (Claude Opus 5.5, Fable 5.1: thinking is always on) refuses a request that forces
+        a tool -- ``tool_choice`` of type ``tool`` or ``any`` -- with ``400 tool_choice: type "tool"
+        and "any" are not supported for this model``. JSON mode must then not force its tool (it
+        uses native structured output where the model has it). Only an explicit ``false`` counts:
+        an unmapped model keeps today's behaviour.
+        """
+        resolved: Final = AnthropicModelInfo._get_provider_resolved_capability(
+            model, "supports_forced_tool_use", custom_llm_provider
+        )
+        if resolved is not None:
+            return resolved is False
+        return AnthropicModelInfo._get_model_capability(model, "supports_forced_tool_use") is False
+
+    @staticmethod
+    def _apply_forced_tool_choice(
+        model: str, tool_choice: Mapping[str, Any], drop_params: bool, custom_llm_provider: str = "anthropic"
+    ) -> dict[str, Any]:
+        """A caller's FORCED ``tool_choice`` (type ``any`` / ``tool``) for a model that refuses it.
+
+        With ``drop_params`` (the call's or ``litellm.drop_params``) it is downgraded to ``auto``,
+        with a warning; without it the call fails here with a clean 400 naming the fix, rather than
+        a provider 400 after the request was sent. Anything else passes through unchanged.
+        """
+        if tool_choice.get("type") not in ("any", "tool"):
+            return dict(tool_choice)
+        if not AnthropicModelInfo.forced_tool_use_unsupported(model, custom_llm_provider):
+            return dict(tool_choice)
+        if not (litellm.drop_params or drop_params):
+            raise litellm.utils.UnsupportedParamsError(
+                message=(
+                    f"{model} does not support forced tool use (tool_choice='required' or a named "
+                    "tool). Use tool_choice='auto' and say in the prompt when to call the tool, or "
+                    "set `drop_params` to downgrade to 'auto' automatically."
+                ),
+                status_code=400,
+            )
+        litellm.verbose_logger.warning(
+            "%s does not support forced tool use; tool_choice downgraded to 'auto' (drop_params)",
+            model,
+        )
+        return {**{k: v for k, v in tool_choice.items() if k != "name"}, "type": "auto"}
+
+    @staticmethod
     def maybe_drop_disabled_thinking(
         model: str,
         optional_params: dict,  # mutable-ok: in-place out-param, same contract as AnthropicConfig._maybe_drop_speed_param

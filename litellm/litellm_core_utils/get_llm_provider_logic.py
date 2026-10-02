@@ -356,7 +356,7 @@ def get_llm_provider(
                     if api_base is not None and not isinstance(api_base, str):
                         raise Exception(f"api base needs to be a string. api_base={api_base}")
                     if dynamic_api_key is not None and not isinstance(dynamic_api_key, str):
-                        raise Exception(f"dynamic_api_key needs to be a string. dynamic_api_key={dynamic_api_key}")
+                        raise Exception("dynamic_api_key needs to be a string.")
                     return model, custom_llm_provider, dynamic_api_key, api_base
 
         # check if model in known model provider list  -> for huggingface models, raise exception as they don't have a fixed provider (can be togetherai, anyscale, baseten, runpod, et.)
@@ -498,7 +498,7 @@ def get_llm_provider(
         if api_base is not None and not isinstance(api_base, str):
             raise Exception(f"api base needs to be a string. api_base={api_base}")
         if dynamic_api_key is not None and not isinstance(dynamic_api_key, str):
-            raise Exception(f"dynamic_api_key needs to be a string. dynamic_api_key={dynamic_api_key}")
+            raise Exception("dynamic_api_key needs to be a string.")
         return model, custom_llm_provider, dynamic_api_key, api_base
     except Exception as e:
         if isinstance(e, litellm.exceptions.BadRequestError):
@@ -851,7 +851,7 @@ def _get_openai_compatible_provider_info(
     if api_base is not None and not isinstance(api_base, str):
         raise Exception(f"api base needs to be a string. api_base={api_base}")
     if dynamic_api_key is not None and not isinstance(dynamic_api_key, str):
-        raise Exception(f"dynamic_api_key needs to be a string. dynamic_api_key={dynamic_api_key}")
+        raise Exception("dynamic_api_key needs to be a string.")
     if dynamic_api_key is None and api_key is not None:
         dynamic_api_key = api_key
     return model, custom_llm_provider, dynamic_api_key, api_base

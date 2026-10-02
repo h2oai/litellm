@@ -1207,6 +1207,17 @@ def check_coroutine(value) -> bool:
     return get_coroutine_checker().is_async_callable(value)
 
 
+def reject_unapplied_h2o_oauth(h2o_oauth: object, model: object) -> None:
+    if h2o_oauth is None:
+        return
+    raise litellm.AuthenticationError(
+        message="h2o_oauth is set but the h2o OAuth hook did not run. Register "
+        "litellm.integrations.h2o.litellm_oauth_auth_hook.oauth_auth_hook as a callback and call the async API",
+        llm_provider="h2o_oauth",
+        model=str(model),
+    )
+
+
 async def async_pre_call_deployment_hook(kwargs: dict[str, Any], call_type: str):
     """
     Allow modifying the request just before it's sent to the deployment.
@@ -1349,6 +1360,8 @@ def client(original_function):
         # DO NOT MOVE THIS. It always needs to run first
         # Check if this is an async function. If so only execute the async function
         call_type = original_function.__name__
+        if call_type != CallTypes.responses.value:
+            reject_unapplied_h2o_oauth(kwargs.get("h2o_oauth"), kwargs.get("model"))
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if litellm.num_retries_per_request is not None:
@@ -1681,6 +1694,7 @@ def client(original_function):
             modified_kwargs: Final = await async_pre_call_deployment_hook(kwargs, call_type)
             if modified_kwargs is not None:
                 kwargs = modified_kwargs
+            reject_unapplied_h2o_oauth(kwargs.get("h2o_oauth"), model)
 
             # Sync logging_obj.stream after deployment hooks (they may convert it).
             _hook_stream: Final = kwargs.get("stream")

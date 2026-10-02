@@ -27,6 +27,7 @@ ILLEGAL_DISPLAY_PARAMS: Final = [
     "vertex_credentials",
     "aws_access_key_id",
     "aws_secret_access_key",
+    "h2o_oauth",
     "exception",  # internal; not JSON-serializable, never for display
     "litellm_metadata",  # internal tracking metadata with auth objects; not for display
 ]

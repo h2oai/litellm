@@ -3476,6 +3476,10 @@ all_litellm_params = (
     agentic_loop_internal_litellm_params
     + [TRUSTED_CALLBACK_VARS_FIELD, *bedrock_batch_litellm_params]
     + [
+        "ssl_verify",
+        "client_cert",
+        "client_key",
+        "h2o_oauth",
         "metadata",
         "litellm_metadata",
         "keepalive_seconds",
