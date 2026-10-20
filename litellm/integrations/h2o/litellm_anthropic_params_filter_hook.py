@@ -691,7 +691,21 @@ class AnthropicParamsFilterHook(CustomLogger):
                 tag = "strict" if is_strict else "lenient"
                 print(f"🧹 AnthropicParamsFilterHook: Removed top_p ({tag}) for Anthropic model ({model}): {removed}", flush=True)
 
-    def _get_thinking_budget_tokens(self, data: Dict[str, Any]) -> int:
+    @staticmethod
+    def _reasoning_effort_budget_tokens(effort: str, model: str) -> int:
+        try:
+            from litellm import get_llm_provider
+            from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+            model_name, provider, _, _ = get_llm_provider(model)
+            thinking = AnthropicConfig._map_reasoning_effort(
+                reasoning_effort=effort, model=model_name, custom_llm_provider=provider
+            )
+        except Exception:
+            return 0
+        return (thinking or {}).get('budget_tokens') or 0
+
+    def _get_thinking_budget_tokens(self, data: Dict[str, Any], model: str) -> int:
         """
         Get the thinking budget_tokens value from the request.
 
@@ -722,6 +736,11 @@ class AnthropicParamsFilterHook(CustomLogger):
                     if isinstance(thinking, dict) and thinking.get('type') == 'enabled':
                         return thinking.get('budget_tokens', 0)
 
+        for d in (data, extra_body or {}, litellm_params or {}):
+            effort = d.get('reasoning_effort') if isinstance(d, dict) else None
+            if isinstance(effort, str) and effort.strip().lower() not in ('', 'none'):
+                return self._reasoning_effort_budget_tokens(effort, model)
+
         return 0
 
     def _ensure_max_tokens_for_thinking(self, data: Dict[str, Any], model: str) -> None:
@@ -739,7 +758,7 @@ class AnthropicParamsFilterHook(CustomLogger):
             # Not an Anthropic model, nothing to do
             return
 
-        thinking_budget = self._get_thinking_budget_tokens(data)
+        thinking_budget = self._get_thinking_budget_tokens(data, model)
         if thinking_budget == 0:
             # No thinking budget, nothing to do
             return

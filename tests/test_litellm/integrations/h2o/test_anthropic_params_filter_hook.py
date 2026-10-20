@@ -14,6 +14,10 @@ Anthropic ones.
 
 import pytest
 
+from litellm.constants import (
+    DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET,
+    DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
+)
 from litellm.integrations.h2o.litellm_anthropic_params_filter_hook import (
     AnthropicParamsFilterHook,
 )
@@ -412,3 +416,43 @@ async def test_claude_opus_5_5_is_a_no_sampling_model(hook):
     """It was missing from the hook's copy of the list, so its temperature went out and 400'd."""
     out = await _run(hook, {"model": "claude-opus-5-5", "temperature": 0.0, "top_p": 0.9})
     assert "temperature" not in out and "top_p" not in out
+
+
+# --- a string reasoning_effort's thinking budget must fit under max_tokens ----------------
+# The budget LiteLLM maps the effort to has to be below max_tokens, or Anthropic answers 400
+# `max_tokens must be greater than thinking.budget_tokens` (h2oai/h2ogpte#13115).
+
+
+@pytest.mark.parametrize(
+    "effort, budget",
+    [("low", DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET), ("high", DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET)],
+)
+async def test_a_string_reasoning_effort_raises_a_too_small_max_tokens(hook, effort, budget):
+    data = {"model": "claude-haiku-4-5-20251001", "max_tokens": 400, "reasoning_effort": effort}
+    out = await _run(hook, data)
+    assert out["max_tokens"] == budget + 8192
+
+
+@pytest.mark.parametrize(
+    "model, effort, max_tokens",
+    [
+        ("claude-haiku-4-5-20251001", "high", 16000),  # the budget already fits
+        ("claude-haiku-4-5-20251001", "none", 400),
+        ("claude-haiku-4-5-20251001", 16384, 400),  # an integer effort is not mapped to thinking
+        ("claude-sonnet-4-6", "high", 400),  # adaptive thinking has no budget
+    ],
+)
+async def test_max_tokens_kept_when_no_budget_has_to_fit(hook, model, effort, max_tokens):
+    data = {"model": model, "max_tokens": max_tokens, "reasoning_effort": effort}
+    out = await _run(hook, data)
+    assert out["max_tokens"] == max_tokens
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["anthropic/claude-haiku-4-5-20251001", "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"],
+)
+async def test_deployment_dispatch_raises_max_tokens_behind_a_vanity_alias(hook, model):
+    assert (await _run(hook, {"model": "fast-chat", "max_tokens": 400, "reasoning_effort": "low"}))["max_tokens"] == 400
+    result = await _deployment(hook, {"model": model, "max_tokens": 400, "reasoning_effort": "low"})
+    assert result["max_tokens"] == DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET + 8192
