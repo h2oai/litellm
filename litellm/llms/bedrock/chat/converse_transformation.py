@@ -1186,7 +1186,13 @@ class AmazonConverseConfig(BaseConfig):
                 non_default_params=non_default_params, optional_params=optional_params
             )
 
-        final_is_thinking_enabled: Final = self.is_thinking_enabled(optional_params)
+        # h2o: an adaptive-thinking model (Sonnet 5) has `thinking` rewritten to {"type": "adaptive"}
+        # above, which is_thinking_enabled does not recognise -- so a forced tool_choice slipped past
+        # this downgrade and reached Bedrock as `any` alongside thinking. Treat adaptive as thinking.
+        _mapped_thinking: Final = optional_params.get("thinking")
+        final_is_thinking_enabled: Final = self.is_thinking_enabled(optional_params) or (
+            isinstance(_mapped_thinking, dict) and _mapped_thinking.get("type") == "adaptive"
+        )
         if final_is_thinking_enabled and "tool_choice" in optional_params:
             tool_choice_block: Final = optional_params["tool_choice"]
             if isinstance(tool_choice_block, dict):

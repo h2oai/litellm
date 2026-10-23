@@ -1592,7 +1592,7 @@ def test_parallel_tool_calls_tool_choice_includes_type(model: str):
     ],
 )
 def test_parallel_tool_calls_preserves_explicit_tool_choice_type(tool_choice, expected_native):
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {"tool_choice": tool_choice, "parallel_tool_calls": False, "tools": _TOOL_PARAM},
     )
@@ -7384,7 +7384,9 @@ def test_message_level_cache_control_drops_ttl_for_unsupported_model(ttl_target)
 # ---------------------------------------------------------------------------
 
 
-def _converse_request(model: str, non_default_params: dict, drop_params: bool = False) -> dict:
+def _h2o_converse_request(model: str, non_default_params: dict, drop_params: bool = False) -> dict:
+    # h2o: named apart from upstream's own `_converse_request(model, tools, headers)` helper further down
+    # this module, which (defined later) would otherwise shadow this one.
     old_env = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
     old_cost = litellm.model_cost
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -7419,7 +7421,7 @@ def test_thinking_forced_tool_downgrade_reaches_the_request():
     passthrough must not re-send a forced type behind the downgrade's back.
     Asserted at request level: assertions on optional_params cannot see it.
     """
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {
             "tools": _TOOL_PARAM,
@@ -7453,7 +7455,7 @@ def test_unsanitized_tool_name_is_not_forwarded_raw():
             },
         }
     ]
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {
             "tools": tools,
@@ -7475,7 +7477,7 @@ def test_parallel_tool_calls_true_leaves_the_native_tool_choice_alone():
     The native toolChoice keeps it; the passthrough carries only the flag, with no
     ``type`` that would conflict with toolConfig.toolChoice.
     """
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {"tools": _TOOL_PARAM, "tool_choice": "required", "parallel_tool_calls": True},
     )
@@ -7485,7 +7487,7 @@ def test_parallel_tool_calls_true_leaves_the_native_tool_choice_alone():
 
 def test_no_config_emitted_without_tools():
     """Anthropic rejects tool_choice sent without tools, so do not invent one."""
-    data = _converse_request("anthropic.claude-sonnet-5", {"parallel_tool_calls": False})
+    data = _h2o_converse_request("anthropic.claude-sonnet-5", {"parallel_tool_calls": False})
     assert "tool_choice" not in data.get("additionalModelRequestFields", {})
 
 
@@ -7495,7 +7497,7 @@ def test_parallel_tool_calls_none_does_not_disable_parallel_use():
     ``not None`` is True, so the old ``disable_parallel = not value`` turned an
     explicit null into disable_parallel_tool_use=True.
     """
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {"tools": _TOOL_PARAM, "parallel_tool_calls": None},
     )
@@ -7508,7 +7510,7 @@ def test_tool_choice_without_parallel_tool_calls_is_untouched():
     Nothing had pinned it: a caller who never sends parallel_tool_calls must get
     the native toolChoice exactly as before.
     """
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {"tools": _TOOL_PARAM, "tool_choice": "required"},
     )
@@ -7519,7 +7521,7 @@ def test_tool_choice_without_parallel_tool_calls_is_untouched():
 def test_config_is_not_emitted_for_models_without_support():
     """Gated by the cost-map flag: a non-Anthropic Bedrock model keeps the native
     field and gets no passthrough."""
-    data = _converse_request(
+    data = _h2o_converse_request(
         "mistral.mistral-large-2402-v1:0",
         {"tools": _TOOL_PARAM, "tool_choice": "required", "parallel_tool_calls": False},
     )
@@ -7535,7 +7537,7 @@ def test_non_list_tools_do_not_produce_a_tool_choice_without_toolconfig():
     with additionalModelRequestFields.tool_choice and no toolConfig.tools -- the
     exact 400 the guard exists to prevent.
     """
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {
             "tools": {"type": "function", "function": {"name": "get_weather"}},
@@ -7564,7 +7566,7 @@ def test_response_format_injected_tools_still_honour_parallel_tool_calls():
     # this test vacuous -- no tool is injected, `toolConfig.tools` is empty, and a
     # conditional assertion never runs. (An earlier version of this test did
     # exactly that and passed with the fix reverted.)
-    data = _converse_request(
+    data = _h2o_converse_request(
         "claude-sonnet-4-5-20250929-v1:0",
         {
             "response_format": {
@@ -7595,7 +7597,7 @@ def test_tool_choice_none_is_not_reinvented_as_auto():
     # tool_choice="none" otherwise, so the dropped path -- the one where
     # map_tool_choice_values returns None and the caller's intent is invisible
     # downstream -- only exists here.
-    data = _converse_request(
+    data = _h2o_converse_request(
         "anthropic.claude-sonnet-5",
         {"tools": _TOOL_PARAM, "tool_choice": "none", "parallel_tool_calls": False},
         drop_params=True,
