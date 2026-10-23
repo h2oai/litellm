@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Final, Optional
 
 import jsonschema
 
@@ -19,6 +19,11 @@ NONNEG_NUMBER: JsonSchema = {"type": "number", "minimum": 0}
 NONNEG_INTEGER: JsonSchema = {"type": "integer", "minimum": 0}
 BOOLEAN: JsonSchema = {"type": "boolean"}
 STRING: JsonSchema = {"type": "string"}
+NON_BLANK_STRING: Final[JsonSchema] = {"type": "string", "pattern": r"\S"}
+TIME_WINDOW: Final[JsonSchema] = {"type": "string", "pattern": r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$"}
+WEEKDAY_PATTERN: Final = (
+    r"(?i)^(mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday)$"
+)
 
 EXTRA_BOOLEAN_KEYS = frozenset(
     {
@@ -31,7 +36,62 @@ EXTRA_BOOLEAN_KEYS = frozenset(
     }
 )
 
+HOURS_UTC: Final[JsonSchema] = {
+    "description": 'UTC "HH:MM-HH:MM" window, or a list of them; a window may wrap past midnight.',
+    "oneOf": [TIME_WINDOW, {"type": "array", "items": TIME_WINDOW, "minItems": 1}],
+}
+
+OFF_PEAK_WINDOW: Final[JsonSchema] = {
+    "type": "object",
+    "properties": {
+        "hours_utc": HOURS_UTC,
+        "weekdays": {
+            "type": "array",
+            "description": "ISO-8601 weekday numbers (1 = Monday .. 7 = Sunday) or English day names the window applies on.",
+            "items": {
+                "oneOf": [
+                    {"type": "integer", "minimum": 1, "maximum": 7},
+                    {"type": "string", "pattern": WEEKDAY_PATTERN},
+                ]
+            },
+            "minItems": 1,
+        },
+    },
+    "required": ["hours_utc"],
+    "additionalProperties": False,
+}
+
 OBJECT_KEYS: dict[str, JsonSchema] = {
+    "search_free_requests": {
+        "type": "object",
+        "description": "Free Google Search grounding requests per period, shared across models in the same shared_group.",
+        "required": ["count", "period", "shared_group"],
+        "additionalProperties": False,
+        "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "period": {"type": "string", "enum": ["day", "month"]},
+            "shared_group": {"type": "string", "pattern": "\\S"},
+        },
+    },
+    "off_peak_pricing": {
+        "type": "object",
+        "description": "Rates that replace the same-named base fields while the request falls inside the stated UTC windows.",
+        "properties": {
+            "hours_utc": HOURS_UTC,
+            "windows": {"type": "array", "items": OFF_PEAK_WINDOW, "minItems": 1},
+            "weekday_timezone": {
+                "type": "string",
+                "description": "IANA zone the weekdays of each window are read on; defaults to UTC.",
+            },
+            "input_cost_per_token": NONNEG_NUMBER,
+            "output_cost_per_token": NONNEG_NUMBER,
+            "output_cost_per_reasoning_token": NONNEG_NUMBER,
+            "cache_read_input_token_cost": NONNEG_NUMBER,
+            "cache_creation_input_token_cost": NONNEG_NUMBER,
+        },
+        "anyOf": [{"required": ["hours_utc"]}, {"required": ["windows"]}],
+        "additionalProperties": False,
+    },
     "search_context_cost_per_query": {
         "type": "object",
         "description": "USD cost per web search query, keyed by search context size.",
@@ -55,9 +115,25 @@ OBJECT_KEYS: dict[str, JsonSchema] = {
         "type": "object",
         "description": "Provider-internal routing hints (e.g. bedrock_invocation_schema).",
     },
+    "token_count_model": {
+        "type": "object",
+        "required": ["model"],
+        "additionalProperties": False,
+        "properties": {
+            "model": NON_BLANK_STRING,
+            "region": NON_BLANK_STRING,
+            "litellm_provider": {"type": "string", "enum": ["bedrock", "bedrock_mantle"]},
+        },
+        "description": "Model that counts tokens for this one, its counting provider, and the AWS region its count API runs in.",
+    },
 }
 
 ARRAY_KEYS: dict[str, JsonSchema] = {
+    "supported_audio_formats": {
+        "type": "array",
+        "description": "Audio container formats the model can return.",
+        "items": {"type": "string", "enum": ["mp3", "wav"]},
+    },
     "supported_endpoints": {
         "type": "array",
         "description": "OpenAI-style API routes this model can be called through, e.g. /v1/chat/completions.",
@@ -72,6 +148,11 @@ ARRAY_KEYS: dict[str, JsonSchema] = {
         "type": "array",
         "description": "Output modalities the model can produce.",
         "items": {"type": "string", "enum": ["text", "image", "audio", "video", "code"]},
+    },
+    "reasoning_effort_levels": {
+        "type": "array",
+        "description": "Exact reasoning_effort levels this deployment accepts; wins over supports_* flags.",
+        "items": {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
     },
     "supported_regions": {
         "type": "array",
@@ -131,6 +212,10 @@ INTEGER_KEYS: dict[str, JsonSchema] = {
         **NONNEG_INTEGER,
         "description": "Smallest prefix the provider will actually cache; absent means the provider default applies.",
     },
+    "token_count_framing": {
+        **NONNEG_INTEGER,
+        "description": "Tokens added once per request to a local count estimate, for the provider's chat framing.",
+    },
     "tpm": {**NONNEG_INTEGER, "description": "Provider default tokens-per-minute limit."},
     "rpm": {**NONNEG_INTEGER, "description": "Provider default requests-per-minute limit."},
 }
@@ -157,6 +242,9 @@ COST_DESCRIPTIONS: dict[str, str] = {
     "input_cost_per_token": "USD per prompt token.",
     "output_cost_per_token": "USD per generated token.",
     "output_cost_per_reasoning_token": "USD per reasoning/thinking token, when billed separately.",
+    "google_maps_grounding_cost_per_query": (
+        "USD per Grounding with Google Maps request; billed per query or per prompt per web_search_billing_unit."
+    ),
     "cache_creation_input_token_cost": "USD per token written to the provider's prompt cache.",
     "cache_read_input_token_cost": "USD per prompt token served from the provider's prompt cache.",
     "input_cost_per_token_batches": "USD per prompt token via the provider's batch API.",
@@ -183,6 +271,11 @@ def cost_schema(key: str) -> JsonSchema:
 
 def string_key_schemas(modes: tuple) -> dict[str, JsonSchema]:
     return {
+        "token_count_tokenizer": {
+            "type": "string",
+            "description": "Tokenizer litellm counts this model's requests with when the provider cannot count them.",
+            "enum": ["kimi_k3"],
+        },
         "litellm_provider": {
             "type": "string",
             "description": "LiteLLM provider slug; one of https://docs.litellm.ai/docs/providers.",
@@ -212,8 +305,21 @@ def string_key_schemas(modes: tuple) -> dict[str, JsonSchema]:
             "description": "Highest reasoning effort the Bedrock output_config accepts for this model.",
             "enum": ["low", "medium", "high", "max", "xhigh"],
         },
+        "default_reasoning_effort": {
+            "type": "string",
+            "description": (
+                "Reasoning effort the provider applies when the request omits reasoning_effort. "
+                "Gates whether a non-default temperature or the top_p/logprobs sampling params are "
+                "accepted, which hold only when the effort resolves to 'none'."
+            ),
+            "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+        },
         "comment": STRING,
         "audio_transcription_config": STRING,
+        "vertex_ai_audio_api": {
+            "type": "string",
+            "enum": ["lyria_predict", "lyria_interactions"],
+        },
     }
 
 
@@ -301,9 +407,7 @@ def render(schema: JsonSchema) -> str:
 
 
 def validation_errors(prices: dict, schema: JsonSchema) -> tuple:
-    validator = jsonschema.Draft202012Validator(
-        schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
-    )
+    validator = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER)
     return tuple(
         f"{'.'.join(str(part) for part in error.absolute_path)}: {error.message}"
         for error in validator.iter_errors(prices)
