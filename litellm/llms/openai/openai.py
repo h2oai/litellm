@@ -394,6 +394,12 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         workload_identity_config: Final = resolve_openai_workload_identity_config(
             api_key=api_key, api_base=api_base, litellm_params=litellm_params
         )
+        # h2o: the deployment's TLS settings (ssl_verify, mTLS client_cert/client_key) shape the
+        # http client, so they are locals here and part of the client cache key
+        tls_client_kwargs: Final = BaseOpenAILLM.tls_client_kwargs(litellm_params)
+        ssl_verify: Final = tls_client_kwargs["ssl_verify"]
+        client_cert: Final = tls_client_kwargs["client_cert"]
+        client_key: Final = tls_client_kwargs["client_key"]
         client_initialization_params: Final[dict] = locals()
         if client is None:
             if not isinstance(max_retries, int):
@@ -410,7 +416,12 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 if isinstance(cached_client, OpenAI) or isinstance(cached_client, AsyncOpenAI):
                     return cached_client
             if is_async:
-                async_http_client: Final = OpenAIChatCompletion._get_async_http_client(shared_session=shared_session)
+                async_http_client: Final = OpenAIChatCompletion._get_async_http_client(
+                    shared_session=shared_session,
+                    ssl_verify=ssl_verify,
+                    client_cert=client_cert,
+                    client_key=client_key,
+                )
                 http_client: httpx.Client | httpx.AsyncClient | None = async_http_client
                 _new_client: OpenAI | AsyncOpenAI = (
                     AsyncOpenAI(
@@ -432,7 +443,11 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     )
                 )
             else:
-                sync_http_client: Final = OpenAIChatCompletion._get_sync_http_client()
+                sync_http_client: Final = OpenAIChatCompletion._get_sync_http_client(
+                    ssl_verify=ssl_verify,
+                    client_cert=client_cert,
+                    client_key=client_key,
+                )
                 http_client = sync_http_client
                 _new_client = (
                     OpenAI(

@@ -73,6 +73,12 @@ class ProviderConnection:
     client: "ProviderClient | None" = None
     shared_session: "ClientSession | None" = None
     ssl_verify: bool | str | None = None
+    # h2o: per-deployment mTLS client certificate paths and the per-model h2o OAuth config. Server-side
+    # references only (auth_utils rejects them in request bodies); registered as LiteLLM-owned so they never
+    # leak into a provider request body via extra_body.
+    client_cert: str | None = None
+    client_key: str | None = None
+    h2o_oauth: Mapping[str, object] | None = None
     request_timeout: float | None = None
     force_timeout: float | None = None
     stream_timeout: float | str | None = None

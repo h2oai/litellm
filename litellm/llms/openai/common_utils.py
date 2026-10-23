@@ -10,6 +10,7 @@ import ssl
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, NamedTuple, Optional
 from urllib.parse import urlsplit
 
@@ -21,6 +22,7 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.completion_usage import CompletionUsage
+from typing_extensions import ReadOnly, TypedDict
 
 if TYPE_CHECKING:
     from aiohttp import ClientSession
@@ -31,9 +33,22 @@ from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
     _DEFAULT_TTL_FOR_HTTPX_CLIENTS,
     AsyncHTTPHandler,
+    get_client_cert_ssl_context,
     get_ssl_configuration,
     http2_enabled,
 )
+from litellm.types.llms.custom_http import VerifyTypes
+
+_GLOBAL_SESSION_CONFLICT: Final = (
+    "litellm.{attr} is set, so this deployment's client_cert would not be presented. "
+    "Unset litellm.{attr} or remove client_cert from the deployment"
+)
+
+
+class OpenAITLSClientKwargs(TypedDict):
+    ssl_verify: ReadOnly[VerifyTypes | None]
+    client_cert: ReadOnly[str | None]
+    client_key: ReadOnly[str | None]
 
 
 def _get_client_init_params(cls: type) -> tuple[str, ...]:
@@ -279,6 +294,9 @@ class BaseOpenAILLM:
             "organization",
             "api_base",
             "workload_identity_config",
+            "ssl_verify",
+            "client_cert",
+            "client_key",
         )
         openai_client_fields: Final = (
             BaseOpenAILLM.get_openai_client_initialization_param_fields(client_type=client_type)
@@ -302,10 +320,37 @@ class BaseOpenAILLM:
             return _AZURE_OPENAI_INIT_PARAMS
 
     @staticmethod
+    def tls_client_kwargs(litellm_params: Mapping[str, object] | None) -> OpenAITLSClientKwargs:
+        params: Final = litellm_params or MappingProxyType({})
+        ssl_verify: Final = params.get("ssl_verify")
+        client_cert: Final = params.get("client_cert")
+        client_key: Final = params.get("client_key")
+        return OpenAITLSClientKwargs(
+            ssl_verify=ssl_verify if isinstance(ssl_verify, (bool, str, ssl.SSLContext)) else None,
+            client_cert=client_cert if isinstance(client_cert, str) else None,
+            client_key=client_key if isinstance(client_key, str) else None,
+        )
+
+    @staticmethod
+    def _get_tls_config(
+        ssl_verify: VerifyTypes | None,
+        client_cert: str | None,
+        client_key: str | None,
+    ) -> VerifyTypes:
+        if client_cert:
+            return get_client_cert_ssl_context(ssl_verify, client_cert, client_key)
+        return get_ssl_configuration(ssl_verify)
+
+    @staticmethod
     def _get_async_http_client(
         shared_session: Optional["ClientSession"] = None,
+        ssl_verify: VerifyTypes | None = None,
+        client_cert: str | None = None,
+        client_key: str | None = None,
     ) -> httpx.AsyncClient | None:
         if litellm.aclient_session is not None:
+            if client_cert:
+                raise ValueError(_GLOBAL_SESSION_CONFLICT.format(attr="aclient_session"))
             return litellm.aclient_session
 
         if getattr(litellm, "network_mock", False):
@@ -314,7 +359,7 @@ class BaseOpenAILLM:
             return httpx.AsyncClient(transport=MockOpenAITransport())
 
         # Get unified SSL configuration
-        ssl_config: Final = get_ssl_configuration()
+        ssl_config: Final = BaseOpenAILLM._get_tls_config(ssl_verify, client_cert, client_key)
         transport: Final = AsyncHTTPHandler.create_async_transport(
             ssl_context=(ssl_config if isinstance(ssl_config, ssl.SSLContext) else None),
             ssl_verify=ssl_config if isinstance(ssl_config, bool) else None,
@@ -337,8 +382,14 @@ class BaseOpenAILLM:
         return cls._get_async_http_client(shared_session)
 
     @staticmethod
-    def _get_sync_http_client() -> httpx.Client | None:
+    def _get_sync_http_client(
+        ssl_verify: VerifyTypes | None = None,
+        client_cert: str | None = None,
+        client_key: str | None = None,
+    ) -> httpx.Client | None:
         if litellm.client_session is not None:
+            if client_cert:
+                raise ValueError(_GLOBAL_SESSION_CONFLICT.format(attr="client_session"))
             return litellm.client_session
 
         if getattr(litellm, "network_mock", False):
@@ -347,7 +398,7 @@ class BaseOpenAILLM:
             return httpx.Client(transport=MockOpenAITransport())
 
         # Get unified SSL configuration
-        ssl_config: Final = get_ssl_configuration()
+        ssl_config: Final = BaseOpenAILLM._get_tls_config(ssl_verify, client_cert, client_key)
 
         return httpx.Client(
             verify=ssl_config,

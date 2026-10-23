@@ -5730,6 +5730,8 @@ def completion(
             prompt_id=prompt_id,
             prompt_variables=prompt_variables,
             ssl_verify=ssl_verify,
+            client_cert=kwargs.get("client_cert", None),
+            client_key=kwargs.get("client_key", None),
             merge_reasoning_content_in_choices=kwargs.get("merge_reasoning_content_in_choices", None),
             use_litellm_proxy=kwargs.get("use_litellm_proxy", False),
             api_version=api_version,
