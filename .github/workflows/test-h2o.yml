@@ -57,6 +57,7 @@ jobs:
             tests/unit/integrations/h2o \
             tests/unit/llms/openai/test_openai_client_tls.py \
             tests/unit/llms/anthropic/chat/test_claude_json_mode_never_forces_a_tool_it_refuses.py \
+            tests/unit/llms/bedrock/chat/test_converse_transformation.py \
             tests/unit/proxy/auth/test_auth_utils.py \
             tests/unit/proxy/common_utils/test_openai_endpoint_utils.py \
             tests/unit/proxy/health_endpoints/test_health_endpoints.py \
