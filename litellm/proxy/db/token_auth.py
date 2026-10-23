@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Final, TypeAlias
 
-from pydantic import BaseModel
 from typing_extensions import assert_never
 
 from litellm._logging import verbose_proxy_logger
+from litellm.types.llms.base import LiteLLMBaseModel
 
 IAM_TOKEN_DB_AUTH_ENV_VAR: Final = "IAM_TOKEN_DB_AUTH"
 AZURE_POSTGRESQL_AUTH_ENV_VAR: Final = "AZURE_POSTGRESQL_AUTH"
@@ -62,7 +62,7 @@ def token_auth_flag_enabled(value: str | bool | None, *, env_var: str) -> bool:
         return False
     raise ValueError(
         f"{env_var}={value!r} is not a recognized boolean. Set it to one of "
-        f"{', '.join(sorted(TRUTHY_TOKEN_AUTH_VALUES))} to turn token auth on, or to one of "
+        f"{', '.join(sorted(TRUTHY_TOKEN_AUTH_VALUES))} to turn it on, or to one of "
         f"{', '.join(sorted(v for v in FALSY_TOKEN_AUTH_VALUES if v))} to turn it off."
     )
 
@@ -217,7 +217,7 @@ def _parse_rds_token_expiration(token: str) -> datetime | None:
         return None
 
 
-class _EntraAccessTokenClaims(BaseModel):
+class _EntraAccessTokenClaims(LiteLLMBaseModel):
     exp: int
 
 

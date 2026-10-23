@@ -1,5 +1,9 @@
 name: "h2o Unit Tests"
 
+# Runs the tests that cover the h2o patches (litellm/integrations/h2o and the h2o edits to
+# core files). Self-contained: upstream v1.106 removed the reusable _test-unit-base.yml this
+# workflow used to call, and upstream's own unit workflow only triggers for main / litellm_**.
+
 on:
   pull_request:
     branches:
@@ -18,20 +22,43 @@ concurrency:
 
 jobs:
   h2o:
-    permissions:
-      contents: read
-      id-token: write
-      pull-requests: write
-    uses: ./.github/workflows/_test-unit-base.yml
-    with:
-      test-path: >-
-        tests/test_litellm/integrations/h2o
-        tests/test_litellm/llms/openai/test_openai_client_tls.py
-        tests/test_litellm/proxy/auth/test_auth_utils.py
-        tests/test_litellm/proxy/common_utils/test_openai_endpoint_utils.py
-        tests/test_litellm/proxy/health_endpoints/test_health_endpoints.py
-      artifact-name: h2o
-      workers: 2
-      reruns: 1
-      timeout-minutes: 20
-      job-timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      UV_PYTHON: "3.12"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv-with-retries
+        with:
+          version: "0.10.9"
+
+      - name: Install dependencies
+        timeout-minutes: 25
+        run: |
+          .github/scripts/uv_sync_with_retries.sh --frozen --group ci --group proxy-dev --extra google --extra proxy --extra caching --extra extra_proxy --extra proxy-runtime --extra utils
+
+      - name: Generate Prisma client
+        run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
+
+      - name: Run tests
+        timeout-minutes: 20
+        run: |
+          uv run --no-sync pytest \
+            tests/unit/integrations/h2o \
+            tests/unit/llms/openai/test_openai_client_tls.py \
+            tests/unit/llms/anthropic/chat/test_claude_json_mode_never_forces_a_tool_it_refuses.py \
+            tests/unit/llms/bedrock/chat/test_converse_transformation.py \
+            tests/unit/proxy/auth/test_auth_utils.py \
+            tests/unit/proxy/common_utils/test_openai_endpoint_utils.py \
+            tests/unit/proxy/health_endpoints/test_health_endpoints.py \
+            --tb=short -n 2 --reruns 1 --reruns-delay 1 --timeout=120
