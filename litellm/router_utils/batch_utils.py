@@ -3,8 +3,11 @@ import json
 from os import PathLike
 from typing import Final
 
+from openai.types import Batch
+
 from litellm._logging import verbose_logger
 from litellm.types.llms.openai import FileTypes, OpenAIFilesPurpose
+from litellm.types.utils import CallTypes
 
 
 class InMemoryFile(io.BytesIO):
@@ -61,15 +64,15 @@ def parse_jsonl_with_embedded_newlines(content: str) -> list[dict]:
 
 def should_replace_model_in_jsonl(
     purpose: OpenAIFilesPurpose,
+    passthrough: bool = False,
 ) -> bool:
     """
     Check if the model name should be replaced in the JSONL file for the deployment model name.
 
     Azure raises an error on create batch if the model name for deployment is not in the .jsonl.
+    A passthrough upload keeps the caller's bytes untouched, so its rows are never rewritten.
     """
-    if purpose == "batch":
-        return True
-    return False
+    return purpose == "batch" and not passthrough
 
 
 def replace_model_in_jsonl(file_content: FileTypes, new_model_name: str) -> FileTypes:
@@ -149,7 +152,7 @@ def replace_model_in_jsonl(file_content: FileTypes, new_model_name: str) -> File
         return file_content
 
 
-def _get_router_metadata_variable_name(function_name: str | None) -> str:
+def get_router_metadata_variable_name(function_name: str | None) -> str:
     """
     Helper to return what the "metadata" field should be called in the request data
 
@@ -170,3 +173,35 @@ def _get_router_metadata_variable_name(function_name: str | None) -> str:
         return "litellm_metadata"
     else:
         return "metadata"
+
+
+_get_router_metadata_variable_name = get_router_metadata_variable_name
+
+
+BATCH_RETRIEVE_CALL_TYPES: Final = frozenset(
+    {
+        CallTypes.aretrieve_batch.value,
+        CallTypes.retrieve_batch.value,
+    }
+)
+
+
+def is_batch_retrieve_call_type(call_type: object) -> bool:
+    """
+    A batch retrieve reports the whole job's token usage, which the provider spent
+    asynchronously over the life of the batch, and reports it again on every poll of the
+    finished batch. The counters that measure live traffic, per-minute rate limits and the
+    routing strategies' own state, must not be fed from it.
+    """
+    return isinstance(call_type, str) and call_type in BATCH_RETRIEVE_CALL_TYPES
+
+
+def batch_charged_once_marker_key(spend_key: str, batch_id: str) -> str:
+    return f"{spend_key}:batch:{batch_id}"
+
+
+def batch_id_to_charge_once(call_type: object, response_obj: object, response_cost: float) -> str | None:
+    """A finished batch reports its whole cost on every poll, so its id is charged once per counter."""
+    if response_cost <= 0 or not is_batch_retrieve_call_type(call_type):
+        return None
+    return response_obj.id if isinstance(response_obj, Batch) else None

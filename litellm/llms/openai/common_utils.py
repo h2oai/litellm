@@ -11,7 +11,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, Optional
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple, Optional
+from urllib.parse import urlsplit
 
 import httpx
 import openai
@@ -34,6 +35,7 @@ from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
     get_client_cert_ssl_context,
     get_ssl_configuration,
+    http2_enabled,
 )
 from litellm.types.llms.custom_http import VerifyTypes
 
@@ -56,6 +58,14 @@ def _get_client_init_params(cls: type) -> tuple[str, ...]:
 
 _OPENAI_INIT_PARAMS: Final[tuple[str, ...]] = _get_client_init_params(OpenAI)
 _AZURE_OPENAI_INIT_PARAMS: Final[tuple[str, ...]] = _get_client_init_params(AzureOpenAI)
+
+
+_OPENAI_API_HOST: Final[str] = "api.openai.com"
+
+
+def is_openai_backed_api_base(api_base: str) -> bool:
+    hostname: Final = urlsplit(api_base).hostname
+    return hostname is not None and (hostname == _OPENAI_API_HOST or hostname.endswith(f".{_OPENAI_API_HOST}"))
 
 
 class OpenAIError(BaseLLMException):
@@ -93,8 +103,8 @@ class OpenAIError(BaseLLMException):
 ###################################################################
 def drop_params_from_unprocessable_entity_error(
     e: openai.UnprocessableEntityError | httpx.HTTPStatusError,
-    data: dict[str, Any],
-) -> dict[str, Any]:
+    data: Mapping[str, object],
+) -> dict[str, object]:
     """
     Helper function to read OpenAI UnprocessableEntityError and drop the params that raised an error from the error message.
 
@@ -283,6 +293,7 @@ class BaseOpenAILLM:
             "max_retries",
             "organization",
             "api_base",
+            "workload_identity_config",
             "ssl_verify",
             "client_cert",
             "client_key",
@@ -349,16 +360,26 @@ class BaseOpenAILLM:
 
         # Get unified SSL configuration
         ssl_config: Final = BaseOpenAILLM._get_tls_config(ssl_verify, client_cert, client_key)
+        transport: Final = AsyncHTTPHandler.create_async_transport(
+            ssl_context=(ssl_config if isinstance(ssl_config, ssl.SSLContext) else None),
+            ssl_verify=ssl_config if isinstance(ssl_config, bool) else None,
+            shared_session=shared_session,
+        )
 
         return httpx.AsyncClient(
             verify=ssl_config,
-            transport=AsyncHTTPHandler._create_async_transport(
-                ssl_context=(ssl_config if isinstance(ssl_config, ssl.SSLContext) else None),
-                ssl_verify=ssl_config if isinstance(ssl_config, bool) else None,
-                shared_session=shared_session,
-            ),
+            transport=transport,
+            mounts=AsyncHTTPHandler.create_httpx_proxy_mounts(transport, verify=ssl_config, cert=None),
             follow_redirects=True,
+            http2=http2_enabled(),
         )
+
+    @classmethod
+    def get_async_http_client(
+        cls,
+        shared_session: Optional["ClientSession"] = None,
+    ) -> httpx.AsyncClient | None:
+        return cls._get_async_http_client(shared_session)
 
     @staticmethod
     def _get_sync_http_client(
@@ -382,6 +403,7 @@ class BaseOpenAILLM:
         return httpx.Client(
             verify=ssl_config,
             follow_redirects=True,
+            http2=http2_enabled(),
         )
 
 
