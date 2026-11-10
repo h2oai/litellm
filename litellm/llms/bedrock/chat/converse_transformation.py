@@ -405,6 +405,23 @@ class AmazonConverseConfig(BaseConfig):
         return re.search(r"openai\.gpt-\d", model) is not None
 
     @staticmethod
+    def _deployment_capability(model: str, capability: str) -> bool | None:
+        """An explicit flag from the deployment's model_info, which the router registers under its litellm_params.model."""
+        bare: Final = model.removeprefix("bedrock/").removeprefix("converse/")
+        for key in (f"bedrock/converse/{bare}", f"bedrock/{bare}"):
+            value = (litellm.model_cost.get(key) or {}).get(capability)
+            if isinstance(value, bool):
+                return value
+        return None
+
+    @staticmethod
+    def _in_bundled_model_map(model: str, base_model: str) -> bool:
+        bare: Final = model.removeprefix("bedrock/").removeprefix("converse/")
+        # a versioned id ("amazon.titan-embed-text-v1:0") is known when its unversioned entry is
+        ids: Final = {bare, base_model, re.sub(r":\d+$", "", bare), re.sub(r":\d+$", "", base_model)}
+        return any(key in litellm.model_cost for i in ids for key in (i, f"bedrock/{i}", f"bedrock_converse/{i}"))
+
+    @staticmethod
     def _requires_min_max_tokens(model: str) -> bool:
         return re.search(r"openai\.gpt-\d|xai\.grok-", model) is not None
 
@@ -703,26 +720,38 @@ class AmazonConverseConfig(BaseConfig):
         ## Filter out 'cross-region' from model name
         base_model: Final = BedrockModelInfo.get_base_model(model)
 
-        if (
-            base_model.startswith("anthropic")
-            or base_model.startswith("mistral")
-            or base_model.startswith("cohere")
-            or base_model.startswith("meta.llama3-1")
-            or base_model.startswith("meta.llama3-2")
-            or base_model.startswith("meta.llama3-3")
-            or base_model.startswith("meta.llama4")
-            or base_model.startswith("amazon.nova")
-            or supports_function_calling(model=model, custom_llm_provider=self.custom_llm_provider)
-        ):
+        # h2o: an explicit deployment flag wins; a model missing from the map keeps its tools (h2oai/h2ogpte#13426)
+        deployment_tools: Final = self._deployment_capability(model, "supports_function_calling")
+        if deployment_tools is not None:
+            tools_supported = deployment_tools
+        else:
+            tools_supported = (
+                base_model.startswith("anthropic")
+                or base_model.startswith("mistral")
+                or base_model.startswith("cohere")
+                or base_model.startswith("meta.llama3-1")
+                or base_model.startswith("meta.llama3-2")
+                or base_model.startswith("meta.llama3-3")
+                or base_model.startswith("meta.llama4")
+                or base_model.startswith("amazon.nova")
+                or supports_function_calling(model=model, custom_llm_provider=self.custom_llm_provider)
+                or not self._in_bundled_model_map(model, base_model)
+            )
+        if tools_supported:
             supported_params.append("tools")
 
         # Nova models support web_search_options (mapped to nova_grounding systemTool)
         if base_model.startswith("amazon.nova"):
             supported_params.append("web_search_options")
 
-        if litellm.utils.supports_tool_choice(
-            model=model, custom_llm_provider=self.custom_llm_provider
-        ) or litellm.utils.supports_tool_choice(model=base_model, custom_llm_provider=self.custom_llm_provider):
+        deployment_tool_choice: Final = self._deployment_capability(model, "supports_tool_choice")
+        if deployment_tool_choice is True or (
+            deployment_tool_choice is None
+            and (
+                litellm.utils.supports_tool_choice(model=model, custom_llm_provider=self.custom_llm_provider)
+                or litellm.utils.supports_tool_choice(model=base_model, custom_llm_provider=self.custom_llm_provider)
+            )
+        ):
             # only anthropic and mistral support tool choice config. otherwise (E.g. cohere) will fail the call - https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html
             supported_params.append("tool_choice")
 

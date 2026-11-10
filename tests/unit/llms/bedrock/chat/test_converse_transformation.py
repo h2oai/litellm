@@ -1153,6 +1153,39 @@ def test_get_supported_openai_params():
 
 
 @pytest.mark.parametrize(
+    "model_id, deployment_model_info, expected",
+    [
+        ("us.openai.gpt-7-nova", None, (True, False)),
+        ("amazon.titan-text-premier-v1:0", None, (False, False)),
+        ("amazon.titan-text-express-v1:0", None, (False, False)),
+        ("us.deepseek.r1-v1:0", None, (False, False)),
+        ("us.openai.gpt-5.6-sol", None, (True, True)),
+        ("us.openai.gpt-7-nova", {"supports_function_calling": False}, (False, False)),
+        ("us.deepseek.r1-v1:0", {"supports_function_calling": True}, (True, False)),
+        ("us.openai.gpt-7-nova", {"supports_tool_choice": True}, (True, True)),
+    ],
+    ids=[
+        "missing_from_map_keeps_tools",
+        "map_entry_without_flag_drops_tools",
+        "versioned_id_of_map_entry_drops_tools",
+        "map_flag_false_drops_tools",
+        "map_flag_true_keeps_tools",
+        "deployment_false_wins",
+        "deployment_true_wins",
+        "deployment_enables_tool_choice",
+    ],
+)
+def test_h2o_converse_tools_support_follows_deployment_then_map_then_default(
+    monkeypatch, model_id, deployment_model_info, expected
+):
+    # h2o: h2oai/h2ogpte#13426, a Bedrock model missing from the map lost every tool
+    if deployment_model_info is not None:
+        monkeypatch.setitem(litellm.model_cost, f"bedrock/converse/{model_id}", deployment_model_info)
+    supported_params: Final = AmazonConverseConfig().get_supported_openai_params(model=f"converse/{model_id}")
+    assert ("tools" in supported_params, "tool_choice" in supported_params) == expected, supported_params
+
+
+@pytest.mark.parametrize(
     "model",
     [
         "bedrock/us.deepseek.r1-v1:0",
