@@ -1185,6 +1185,19 @@ def test_h2o_converse_tools_support_follows_deployment_then_map_then_default(
     assert ("tools" in supported_params, "tool_choice" in supported_params) == expected, supported_params
 
 
+def test_h2o_dropping_tools_logs_a_warning():
+    tools: Final = [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+    with patch("litellm.utils.verbose_logger.warning") as warning:
+        optional_params: Final = litellm.utils.get_optional_params(
+            model="converse/amazon.titan-text-premier-v1:0",
+            custom_llm_provider="bedrock",
+            tools=tools,
+            drop_params=True,
+        )
+    assert "tools" not in optional_params, optional_params
+    assert warning.call_args.args[1:] == (["tools"], "converse/amazon.titan-text-premier-v1:0", "bedrock")
+
+
 @pytest.mark.parametrize(
     "model",
     [

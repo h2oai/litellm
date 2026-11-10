@@ -4733,6 +4733,18 @@ def get_optional_params(
             if litellm.drop_params is True or (drop_params is not None and drop_params is True):
                 for k in unsupported_params:
                     non_default_params.pop(k, None)
+                # h2o: dropping tools changes what the model can do, so never do it silently (h2oai/h2ogpte#13426)
+                dropped_tool_params: Final = [
+                    k for k in ("tools", "tool_choice", "functions") if k in unsupported_params
+                ]
+                if dropped_tool_params:
+                    verbose_logger.warning(
+                        "Dropping %s for model=%s (provider=%s): the model map does not mark it as supporting them. "
+                        "Set model_info.supports_function_calling / supports_tool_choice on the deployment to override.",
+                        dropped_tool_params,
+                        model,
+                        custom_llm_provider,
+                    )
             else:
                 raise UnsupportedParamsError(
                     status_code=500,
