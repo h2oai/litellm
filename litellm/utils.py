@@ -1468,6 +1468,17 @@ def check_coroutine(value) -> bool:
     return get_coroutine_checker().is_async_callable(value)
 
 
+def reject_unapplied_h2o_oauth(h2o_oauth: object, model: object) -> None:
+    if h2o_oauth is None:
+        return
+    raise litellm.AuthenticationError(
+        message="h2o_oauth is set but the h2o OAuth hook did not run. Register "
+        "litellm.integrations.h2o.litellm_oauth_auth_hook.oauth_auth_hook as a callback and call the async API",
+        llm_provider="h2o_oauth",
+        model=str(model),
+    )
+
+
 async def async_pre_call_deployment_hook(kwargs: dict[str, Any], call_type: str):
     """
     Allow modifying the request just before it's sent to the deployment.
@@ -1696,6 +1707,8 @@ def client(original_function):
         # DO NOT MOVE THIS. It always needs to run first
         # Check if this is an async function. If so only execute the async function
         call_type: Final = _get_call_type_from_public_name(original_function.__name__)
+        if call_type != CallTypes.responses.value:
+            reject_unapplied_h2o_oauth(kwargs.get("h2o_oauth"), kwargs.get("model"))
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if max_retries_per_request_hit(kwargs, litellm.num_retries_per_request):
@@ -2019,6 +2032,7 @@ def client(original_function):
             modified_kwargs: Final = await async_pre_call_deployment_hook(kwargs, call_type)
             if modified_kwargs is not None:
                 kwargs = modified_kwargs
+            reject_unapplied_h2o_oauth(kwargs.get("h2o_oauth"), model)
 
             # Sync logging_obj.stream after deployment hooks (they may convert it).
             _hook_stream: Final = kwargs.get("stream")
@@ -4719,6 +4733,18 @@ def get_optional_params(
             if litellm.drop_params is True or (drop_params is not None and drop_params is True):
                 for k in unsupported_params:
                     non_default_params.pop(k, None)
+                # h2o: dropping tools changes what the model can do, so never do it silently (h2oai/h2ogpte#13426)
+                dropped_tool_params: Final = [
+                    k for k in ("tools", "tool_choice", "functions") if k in unsupported_params
+                ]
+                if dropped_tool_params:
+                    verbose_logger.warning(
+                        "Dropping %s for model=%s (provider=%s): the model map does not mark it as supporting them. "
+                        "Set model_info.supports_function_calling / supports_tool_choice on the deployment to override.",
+                        dropped_tool_params,
+                        model,
+                        custom_llm_provider,
+                    )
             else:
                 raise UnsupportedParamsError(
                     status_code=500,
